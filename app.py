@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
@@ -434,13 +435,19 @@ def main():
     with st.sidebar:
         st.header("API Keys")
 
+        # Read defaults from Streamlit secrets or environment variables
+        default_bifrost = st.secrets.get("BIFROST_API_KEY", os.environ.get("BIFROST_API_KEY", ""))
+        default_firecrawl = st.secrets.get("FIRECRAWL_API_KEY", os.environ.get("FIRECRAWL_API_KEY", ""))
+
         bifrost_key = st.text_input(
             "Patterns Bifrost API Key",
+            value=default_bifrost,
             type="password",
             help="Your Bifrost virtual key (sk-bf-...)",
         )
         firecrawl_key = st.text_input(
             "Firecrawl API Key",
+            value=default_firecrawl,
             type="password",
             help="Required for Firecrawl mode or scraping with CSV mode",
         )
