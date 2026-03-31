@@ -113,6 +113,8 @@ The parser reads these columns (case-insensitive):
 | `Crawl Depth` | Pages at depth 4+ with low inlinks go into `## Optional` section |
 | `Inlinks` | Total internal links pointing to the page |
 | `Unique Inlinks` | Unique pages linking to this page — used for importance ranking |
+| `Folder Depth` | Number of subfolders in URL path |
+| `Link Score` | Screaming Frog's 0-100 PageRank-like metric — low scores go to `## Optional` |
 
 ### Automatic Section Grouping
 

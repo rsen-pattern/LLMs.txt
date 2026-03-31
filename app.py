@@ -101,8 +101,10 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
 
         # Enriched columns for importance / grouping
         crawl_depth = get_field(row, "Crawl Depth", "crawl depth")
+        folder_depth = get_field(row, "Folder Depth", "folder depth")
         inlinks = get_field(row, "Inlinks", "inlinks")
         unique_inlinks = get_field(row, "Unique Inlinks", "unique inlinks")
+        link_score = get_field(row, "Link Score", "link score")
 
         results.append(
             {
@@ -111,8 +113,10 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
                 "description": description or "",
                 "word_count": _safe_int(word_count),
                 "crawl_depth": _safe_int(crawl_depth),
+                "folder_depth": _safe_int(folder_depth),
                 "inlinks": _safe_int(inlinks),
                 "unique_inlinks": _safe_int(unique_inlinks),
+                "link_score": _safe_int(link_score),
             }
         )
 
@@ -130,6 +134,8 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
 OPTIONAL_DEPTH_THRESHOLD = 4
 # Pages with unique inlinks <= this go into Optional (low internal importance)
 OPTIONAL_INLINKS_THRESHOLD = 1
+# Pages with link score <= this are candidates for Optional (0-100 scale, like PageRank)
+OPTIONAL_LINK_SCORE_THRESHOLD = 5
 
 
 def _url_to_section(url: str) -> str:
@@ -152,8 +158,9 @@ def _group_into_sections(
 ) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
     """Split processed results into named sections + an Optional list.
 
-    Pages are marked optional if they have high crawl depth AND low inlinks,
-    indicating secondary/deep content that can be skipped for shorter context.
+    Pages are marked optional if they have high crawl depth AND low inlinks
+    (or low Link Score), indicating secondary/deep content that can be
+    skipped for shorter context.
     """
     sections: Dict[str, List[Dict]] = {}
     optional: List[Dict] = []
@@ -161,11 +168,15 @@ def _group_into_sections(
     for r in results:
         crawl_depth = r.get("crawl_depth", 0)
         unique_inlinks = r.get("unique_inlinks", 0)
+        link_score = r.get("link_score", 0)
 
-        is_optional = (
-            crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
-            and unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+        # A page is optional if it's deep AND has low importance signals
+        is_deep = crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
+        is_low_importance = (
+            unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+            or (link_score > 0 and link_score <= OPTIONAL_LINK_SCORE_THRESHOLD)
         )
+        is_optional = is_deep and is_low_importance
 
         if is_optional:
             optional.append(r)

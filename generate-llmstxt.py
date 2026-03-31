@@ -47,6 +47,7 @@ BIFROST_BASE_URL = "https://bifrost.pattern.com"
 BIFROST_MODEL = "openai/gpt-4o-mini"
 OPTIONAL_DEPTH_THRESHOLD = 4
 OPTIONAL_INLINKS_THRESHOLD = 1
+OPTIONAL_LINK_SCORE_THRESHOLD = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,11 +85,14 @@ def _group_into_sections(
     for r in results:
         crawl_depth = r.get("crawl_depth", 0)
         unique_inlinks = r.get("unique_inlinks", 0)
+        link_score = r.get("link_score", 0)
 
-        is_optional = (
-            crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
-            and unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+        is_deep = crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
+        is_low_importance = (
+            unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+            or (link_score > 0 and link_score <= OPTIONAL_LINK_SCORE_THRESHOLD)
         )
+        is_optional = is_deep and is_low_importance
 
         if is_optional:
             optional.append(r)
@@ -177,8 +181,10 @@ def parse_screaming_frog_csv(csv_path: str, max_urls: int = 0) -> List[Dict]:
             h1 = get_field(row, "H1-1", "H1")
             word_count = get_field(row, "Word Count")
             crawl_depth = get_field(row, "Crawl Depth")
+            folder_depth = get_field(row, "Folder Depth")
             inlinks = get_field(row, "Inlinks")
             unique_inlinks = get_field(row, "Unique Inlinks")
+            link_score = get_field(row, "Link Score")
 
             results.append({
                 "url": address,
@@ -186,8 +192,10 @@ def parse_screaming_frog_csv(csv_path: str, max_urls: int = 0) -> List[Dict]:
                 "description": description or "",
                 "word_count": _safe_int(word_count),
                 "crawl_depth": _safe_int(crawl_depth),
+                "folder_depth": _safe_int(folder_depth),
                 "inlinks": _safe_int(inlinks),
                 "unique_inlinks": _safe_int(unique_inlinks),
+                "link_score": _safe_int(link_score),
             })
 
             if max_urls and len(results) >= max_urls:
