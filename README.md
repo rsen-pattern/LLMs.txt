@@ -196,7 +196,23 @@ Filters are available in the Streamlit sidebar and as CLI flags:
 2. **Hash dedup**: If two pages share the same content `Hash`, only the first is kept
 3. **Near-duplicate dedup**: Pages with `Closest Similarity Match` above the threshold are removed
 
-### Automatic Section Grouping
+### Output Patterns
+
+Choose from three output patterns inspired by real-world llms.txt files:
+
+| Pattern | Inspired By | Best For | Sections |
+|---------|------------|----------|----------|
+| **Catalog** (default) | Stripe, Cloudflare | Large docs sites with diverse content | Getting Started, Core Concepts, Guides, API Reference, Integrations, Resources |
+| **Workflow** | Cursor, Windsurf | Developer tools with setup-oriented docs | Quickstart, Setup & Configuration, Features, Workflows, Troubleshooting, Reference |
+| **Index + Export** | Anthropic, LangGraph | Sites with tutorials and examples | Overview, Documentation, Tutorials, API, Examples |
+
+Select the pattern in the Streamlit sidebar under **General Settings**, or use `--pattern` in the CLI.
+
+### AI Semantic Section Grouping (Streamlit)
+
+When using the Streamlit app with a Bifrost API key, pages are grouped into meaningful sections using AI — producing categories like "Getting Started" and "Core Concepts" instead of mechanical URL-path groups. Each section gets a brief description displayed under the H2 heading.
+
+### URL-Based Section Grouping (Fallback / CLI)
 
 Pages are automatically grouped under **H2 sections** based on their URL path:
 
@@ -204,6 +220,8 @@ Pages are automatically grouped under **H2 sections** based on their URL path:
 - `https://example.com/blog/post` -> `## Blog`
 - `https://example.com/pricing` -> `## Pricing`
 - `https://example.com/` -> `## Main`
+
+Pages within each section are sorted by importance (composite of Link Score, Unique Inlinks, Crawl Depth, and Word Count).
 
 ### Optional Section Detection
 
@@ -281,11 +299,15 @@ python generate-llmstxt.py https://example.com --csv internal_all.csv \
 # Disable deduplication
 python generate-llmstxt.py https://example.com --csv internal_all.csv --no-dedup
 
+# Use a specific output pattern
+python generate-llmstxt.py https://example.com --csv internal_all.csv --pattern workflow
+
 # Full example with all options
 python generate-llmstxt.py https://docs.example.com \
   --csv internal_all.csv \
   --scrape \
   --max-urls 100 \
+  --pattern catalog \
   --filter-thin 50 \
   --output-dir ./output \
   --verbose
