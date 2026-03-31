@@ -803,7 +803,8 @@ def main():
         )
 
         st.divider()
-        st.header("Settings")
+        st.header("General Settings")
+        st.caption("Applies to both Firecrawl and Screaming Frog CSV modes")
 
         max_urls = st.number_input(
             "Max URLs to process",
@@ -815,18 +816,18 @@ def main():
         generate_full = st.checkbox("Generate llms-full.txt", value=True)
 
         st.divider()
-        st.header("Content Filters")
-        st.caption("Applied when using Screaming Frog CSV")
+        st.header("Screaming Frog Filters")
+        st.caption("Only applies when using the Screaming Frog CSV tab")
 
         dedup_enabled = st.checkbox(
             "Remove duplicates",
             value=True,
-            help="Dedup via canonical URLs and content hash from Screaming Frog.",
+            help="Removes pages with duplicate canonical URLs or identical content hashes.",
         )
         near_dupes_enabled = st.checkbox(
             "Remove near-duplicates",
             value=False,
-            help="Remove pages with similarity >= threshold (requires Screaming Frog near-duplicate analysis).",
+            help="Removes pages above the similarity threshold. Requires 'Enable Near Duplicates' in Screaming Frog config.",
         )
         near_dupe_threshold = 90.0
         if near_dupes_enabled:
@@ -842,7 +843,7 @@ def main():
         thin_content_enabled = st.checkbox(
             "Remove thin content",
             value=False,
-            help="Skip pages below a minimum word count.",
+            help="Removes pages below a minimum word count.",
         )
         min_word_count = 50
         if thin_content_enabled:
