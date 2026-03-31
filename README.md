@@ -89,32 +89,112 @@ Upload a Screaming Frog "Internal All" CSV export:
 2. **CSV + AI** — Refines titles/descriptions via Bifrost. Requires Bifrost key.
 3. **CSV + Scrape** — Uses CSV for URL list, Firecrawl for full content. Requires both keys.
 
-### How to Export from Screaming Frog
+### Screaming Frog Setup Guide
 
-1. Open Screaming Frog SEO Spider
-2. Enter your website URL and click **Start**
-3. Wait for the crawl to complete
-4. Go to **File > Export > Internal > All**
-5. Save as CSV and upload to the app
+Follow these steps to get the best results from your Screaming Frog export.
 
-### Expected CSV Columns
+#### Step 1: Configure the Spider
 
-The parser reads these columns (case-insensitive):
+Before crawling, adjust these settings in **Configuration > Spider**:
 
-| Column | Used For |
-|--------|----------|
+- **Crawl tab**: Ensure "Crawl Internal Links" is checked, "Crawl External Links" is unchecked
+- **Limits tab**: Set a **Crawl Depth** limit (e.g. 5-8) to avoid crawling endlessly deep pages
+- **Rendering tab**: Set to **JavaScript Rendering** if your site is an SPA or uses client-side rendering (otherwise "Text Only" is fine)
+
+#### Step 2: Enable Required Columns
+
+Some columns need to be explicitly enabled:
+
+| Setting Location | What to Enable |
+|-----------------|----------------|
+| **Configuration > Spider > Crawl** | Check "Crawl Internal Links" |
+| **Configuration > Content > Duplicates** | Check "Enable Near Duplicates" (required for similarity detection) |
+| **Configuration > Content > Area** | Check "Hash" (enables content hash for exact dedup) |
+
+**Link Score** is calculated automatically under the **Internal** tab — no extra config needed.
+
+#### Step 3: Crawl the Website
+
+1. Enter your full website URL (e.g. `https://example.com`) in the URL bar
+2. Click **Start**
+3. Wait for the crawl to finish (the progress bar at the bottom shows status)
+
+#### Step 4: Export the CSV
+
+1. Click on the **Internal** tab at the top
+2. Select **Filter: HTML** from the dropdown (this pre-filters to HTML pages)
+3. Go to **File > Export** (or click the Export button)
+4. Save as **CSV**
+5. Upload this file to the app
+
+#### Recommended Crawl Settings by Site Size
+
+| Site Size | Max URLs | Crawl Depth | Rendering | Notes |
+|-----------|----------|-------------|-----------|-------|
+| Small (<100 pages) | Unlimited | No limit | Text Only | Full crawl recommended |
+| Medium (100-1,000) | 500 | 6 | Text Only | Use filters to stay under 500 |
+| Large (1,000-10,000) | 1,000 | 5 | Text Only | Focus on key sections |
+| Very Large (10,000+) | 2,000 | 4 | Text Only | Consider crawling subfolders separately |
+
+### CSV Columns Used
+
+The tool reads **20+ columns** from the Screaming Frog export (all case-insensitive):
+
+#### Core Metadata (always used)
+
+| Column | Purpose |
+|--------|---------|
 | `Address` | The page URL |
-| `Status Code` | Filters to 200 responses only |
+| `Status Code` | Filters to 200 OK responses only |
 | `Content Type` | Filters to `text/html` pages only |
 | `Indexability` | Skips non-indexable pages |
-| `Title 1` | Page title (used in link text) |
-| `Meta Description 1` | Page description (used in link description) |
+| `Title 1` | Page title — used as link text in llms.txt |
+| `Meta Description 1` | Page description — used as link description |
 | `H1-1` | Fallback title if Title 1 is empty |
-| `Crawl Depth` | Pages at depth 4+ with low inlinks go into `## Optional` section |
+
+#### Importance & Ranking Signals
+
+| Column | Purpose |
+|--------|---------|
+| `Crawl Depth` | Pages at depth 4+ with low importance go to `## Optional` |
+| `Folder Depth` | URL path depth for section grouping |
 | `Inlinks` | Total internal links pointing to the page |
-| `Unique Inlinks` | Unique pages linking to this page — used for importance ranking |
-| `Folder Depth` | Number of subfolders in URL path |
-| `Link Score` | Screaming Frog's 0-100 PageRank-like metric — low scores go to `## Optional` |
+| `Unique Inlinks` | Unique pages linking to this page — primary importance metric |
+| `Outlinks` | Outgoing internal links (identifies hub pages) |
+| `External Outlinks` | External links (identifies resource/reference pages) |
+| `Link Score` | Screaming Frog's 0-100 PageRank-like metric — scores <=5 at depth 4+ go to `## Optional` |
+
+#### Deduplication
+
+| Column | Purpose |
+|--------|---------|
+| `Canonical Link Element 1` | Uses canonical URL to skip duplicate versions of the same page |
+| `Hash` | MD5 content hash — removes exact duplicate pages |
+| `Closest Similarity Match` | Percentage similarity — filters near-duplicates above threshold (default 90%) |
+
+#### Content Quality
+
+| Column | Purpose |
+|--------|---------|
+| `Word Count` | Filters thin-content pages below minimum word count |
+| `Text Ratio` | Text-to-HTML ratio (extracted for reference) |
+| `Response Time` | Page load time (extracted for reference) |
+
+### Content Filters
+
+Filters are available in the Streamlit sidebar and as CLI flags:
+
+| Filter | Streamlit | CLI Flag | Default |
+|--------|-----------|----------|---------|
+| **Deduplication** (canonical + hash) | "Remove duplicates" checkbox | `--no-dedup` to disable | Enabled |
+| **Near-duplicate removal** | "Remove near-duplicates" checkbox + slider | `--filter-near-dupes 90` | Disabled |
+| **Thin content removal** | "Remove thin content" checkbox + word count input | `--filter-thin 50` | Disabled |
+
+#### How Deduplication Works
+
+1. **Canonical dedup**: If a page's `Canonical Link Element 1` differs from its URL, the page is skipped (the canonical version is kept)
+2. **Hash dedup**: If two pages share the same content `Hash`, only the first is kept
+3. **Near-duplicate dedup**: Pages with `Closest Similarity Match` above the threshold are removed
 
 ### Automatic Section Grouping
 
@@ -125,7 +205,14 @@ Pages are automatically grouped under **H2 sections** based on their URL path:
 - `https://example.com/pricing` -> `## Pricing`
 - `https://example.com/` -> `## Main`
 
-Pages with **high crawl depth (4+)** and **low unique inlinks (<=1)** are automatically placed in the `## Optional` section per the llms.txt spec, indicating they can be skipped for shorter context.
+### Optional Section Detection
+
+Pages are placed in `## Optional` (per the llms.txt spec) if **both** conditions are met:
+
+1. **Crawl Depth >= 4** (deep in the site hierarchy)
+2. **Low importance**: Unique Inlinks <= 1 OR Link Score <= 5
+
+This ensures secondary/deep content can be skipped when shorter LLM context is needed.
 
 ### Validation
 
@@ -174,10 +261,10 @@ Full markdown content of the page...
 
 ## CLI Usage
 
-The original CLI script is also available:
+The CLI script supports all the same features:
 
 ```bash
-# Firecrawl mode
+# Firecrawl mode (auto-crawl)
 python generate-llmstxt.py https://example.com
 
 # Screaming Frog CSV mode
@@ -185,6 +272,23 @@ python generate-llmstxt.py https://example.com --csv internal_all.csv
 
 # CSV without AI (no API keys needed)
 python generate-llmstxt.py https://example.com --csv internal_all.csv --no-ai
+
+# CSV with content filters
+python generate-llmstxt.py https://example.com --csv internal_all.csv \
+  --filter-thin 50 \
+  --filter-near-dupes 90
+
+# Disable deduplication
+python generate-llmstxt.py https://example.com --csv internal_all.csv --no-dedup
+
+# Full example with all options
+python generate-llmstxt.py https://docs.example.com \
+  --csv internal_all.csv \
+  --scrape \
+  --max-urls 100 \
+  --filter-thin 50 \
+  --output-dir ./output \
+  --verbose
 ```
 
 Run `python generate-llmstxt.py --help` for all options.

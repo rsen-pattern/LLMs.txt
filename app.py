@@ -50,11 +50,19 @@ def _safe_int(val: str) -> int:
         return 0
 
 
+def _safe_float(val: str) -> float:
+    """Parse a string to float, returning 0.0 on failure."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict]:
     """Parse a Screaming Frog 'Internal All' CSV from an in-memory string.
 
-    Extracts enriched metadata including Crawl Depth, Inlinks, and
-    Unique Inlinks for page-importance ranking and section grouping.
+    Extracts all useful columns for importance ranking, deduplication,
+    section grouping, and content quality filtering.
     """
     reader = csv.DictReader(io.StringIO(file_contents))
 
@@ -87,24 +95,38 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
         if indexability and indexability.lower() == "non-indexable":
             continue
 
+        # -- Core metadata --
         title = get_field(row, "Title 1", "Title", "title 1", "title")
         description = get_field(
-            row,
-            "Meta Description 1",
-            "Meta Description",
-            "meta description 1",
-            "meta description",
-            "Description 1",
+            row, "Meta Description 1", "Meta Description",
+            "meta description 1", "meta description", "Description 1",
         )
         h1 = get_field(row, "H1-1", "H1", "h1-1", "h1")
-        word_count = get_field(row, "Word Count", "word count")
 
-        # Enriched columns for importance / grouping
+        # -- Content quality --
+        word_count = get_field(row, "Word Count", "word count")
+        text_ratio = get_field(row, "Text Ratio", "text ratio")
+
+        # -- Link / importance signals --
         crawl_depth = get_field(row, "Crawl Depth", "crawl depth")
         folder_depth = get_field(row, "Folder Depth", "folder depth")
         inlinks = get_field(row, "Inlinks", "inlinks")
         unique_inlinks = get_field(row, "Unique Inlinks", "unique inlinks")
+        outlinks = get_field(row, "Outlinks", "outlinks")
+        external_outlinks = get_field(row, "External Outlinks", "external outlinks")
         link_score = get_field(row, "Link Score", "link score")
+
+        # -- Deduplication --
+        content_hash = get_field(row, "Hash", "hash")
+        canonical = get_field(
+            row, "Canonical Link Element 1", "canonical link element 1",
+        )
+        closest_similarity = get_field(
+            row, "Closest Similarity Match", "closest similarity match",
+        )
+
+        # -- Performance --
+        response_time = get_field(row, "Response Time", "response time")
 
         results.append(
             {
@@ -112,11 +134,18 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
                 "title": title or h1 or "",
                 "description": description or "",
                 "word_count": _safe_int(word_count),
+                "text_ratio": _safe_float(text_ratio.rstrip("%")) if text_ratio else 0.0,
                 "crawl_depth": _safe_int(crawl_depth),
                 "folder_depth": _safe_int(folder_depth),
                 "inlinks": _safe_int(inlinks),
                 "unique_inlinks": _safe_int(unique_inlinks),
+                "outlinks": _safe_int(outlinks),
+                "external_outlinks": _safe_int(external_outlinks),
                 "link_score": _safe_int(link_score),
+                "hash": content_hash,
+                "canonical": canonical,
+                "closest_similarity": _safe_float(closest_similarity.rstrip("%")) if closest_similarity else 0.0,
+                "response_time": _safe_float(response_time),
             }
         )
 
@@ -124,6 +153,82 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
             break
 
     return results
+
+
+def deduplicate_entries(entries: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """Remove duplicate pages using canonical URLs and content hashes.
+
+    Returns (deduplicated_entries, removed_duplicates).
+    """
+    seen_canonicals: Dict[str, int] = {}  # canonical_url -> index of first entry
+    seen_hashes: Dict[str, int] = {}      # hash -> index of first entry
+    kept: List[Dict] = []
+    removed: List[Dict] = []
+
+    for entry in entries:
+        url = entry["url"]
+
+        # 1. Canonical dedup: if canonical differs from URL, skip this URL
+        #    (the canonical version should be the one in the output)
+        canonical = entry.get("canonical", "")
+        if canonical and canonical != url:
+            # Check if we already have the canonical URL
+            if canonical in seen_canonicals:
+                removed.append(entry)
+                continue
+            # Use canonical as the key — this URL is the canonical
+            seen_canonicals[canonical] = len(kept)
+        else:
+            seen_canonicals[url] = len(kept)
+
+        # 2. Hash dedup: skip exact duplicate content
+        content_hash = entry.get("hash", "")
+        if content_hash:
+            if content_hash in seen_hashes:
+                removed.append(entry)
+                continue
+            seen_hashes[content_hash] = len(kept)
+
+        kept.append(entry)
+
+    return kept, removed
+
+
+def filter_thin_content(
+    entries: List[Dict], min_word_count: int = 50
+) -> Tuple[List[Dict], List[Dict]]:
+    """Filter out thin-content pages below the word count threshold.
+
+    Returns (kept, removed).
+    """
+    kept: List[Dict] = []
+    removed: List[Dict] = []
+    for entry in entries:
+        wc = entry.get("word_count", 0)
+        if wc > 0 and wc < min_word_count:
+            removed.append(entry)
+        else:
+            kept.append(entry)
+    return kept, removed
+
+
+def filter_near_duplicates(
+    entries: List[Dict], similarity_threshold: float = 90.0
+) -> Tuple[List[Dict], List[Dict]]:
+    """Filter pages with near-duplicate similarity above threshold.
+
+    Keeps the page with more inlinks when a near-duplicate is detected.
+    Returns (kept, removed).
+    """
+    kept: List[Dict] = []
+    removed: List[Dict] = []
+    for entry in entries:
+        sim = entry.get("closest_similarity", 0.0)
+        if sim >= similarity_threshold:
+            removed.append(entry)
+        else:
+            kept.append(entry)
+    return kept, removed
 
 
 # ---------------------------------------------------------------------------
@@ -709,6 +814,46 @@ def main():
         )
         generate_full = st.checkbox("Generate llms-full.txt", value=True)
 
+        st.divider()
+        st.header("Content Filters")
+        st.caption("Applied when using Screaming Frog CSV")
+
+        dedup_enabled = st.checkbox(
+            "Remove duplicates",
+            value=True,
+            help="Dedup via canonical URLs and content hash from Screaming Frog.",
+        )
+        near_dupes_enabled = st.checkbox(
+            "Remove near-duplicates",
+            value=False,
+            help="Remove pages with similarity >= threshold (requires Screaming Frog near-duplicate analysis).",
+        )
+        near_dupe_threshold = 90.0
+        if near_dupes_enabled:
+            near_dupe_threshold = st.slider(
+                "Similarity threshold %",
+                min_value=50,
+                max_value=100,
+                value=90,
+                step=5,
+                help="Pages with similarity at or above this value are removed.",
+            )
+
+        thin_content_enabled = st.checkbox(
+            "Remove thin content",
+            value=False,
+            help="Skip pages below a minimum word count.",
+        )
+        min_word_count = 50
+        if thin_content_enabled:
+            min_word_count = st.number_input(
+                "Min word count",
+                min_value=10,
+                max_value=500,
+                value=50,
+                step=10,
+            )
+
     # ---- Main area: input mode -------------------------------------------
     tab_firecrawl, tab_csv = st.tabs(["🔥 Firecrawl (Auto-Crawl)", "📊 Screaming Frog CSV"])
 
@@ -738,10 +883,9 @@ def main():
     with tab_csv:
         st.markdown(
             "Upload a Screaming Frog **Internal All** CSV export. "
-            "The tool reads `Address`, `Status Code`, `Content Type`, `Title 1`, "
-            "`Meta Description 1`, `Indexability`, plus `Crawl Depth`, `Inlinks`, "
-            "and `Unique Inlinks` for page importance ranking and automatic "
-            "`## Optional` section detection."
+            "The tool uses **20+ columns** including link metrics, content hashes, "
+            "and canonical URLs for deduplication, importance ranking, and automatic "
+            "`## Optional` section detection. See the sidebar for content filters."
         )
 
         csv_url = st.text_input(
@@ -788,6 +932,11 @@ def main():
                     generate_full,
                     use_ai,
                     scrape_content,
+                    dedup_enabled=dedup_enabled,
+                    near_dupes_enabled=near_dupes_enabled,
+                    near_dupe_threshold=float(near_dupe_threshold),
+                    thin_content_enabled=thin_content_enabled,
+                    min_word_count=min_word_count,
                 )
 
 
@@ -820,8 +969,12 @@ def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full):
         st.error(f"Generation failed: {e}")
 
 
-def _run_csv(url, uploaded_file, firecrawl_key, bifrost_key, max_urls, generate_full, use_ai, scrape):
-    """Execute CSV-based generation and display results."""
+def _run_csv(
+    url, uploaded_file, firecrawl_key, bifrost_key, max_urls, generate_full,
+    use_ai, scrape, dedup_enabled=True, near_dupes_enabled=False,
+    near_dupe_threshold=90.0, thin_content_enabled=False, min_word_count=50,
+):
+    """Execute CSV-based generation with filtering and display results."""
     generator = LLMsTextGenerator(
         firecrawl_api_key=firecrawl_key if scrape else None,
         bifrost_api_key=bifrost_key if use_ai else None,
@@ -838,7 +991,44 @@ def _run_csv(url, uploaded_file, firecrawl_key, bifrost_key, max_urls, generate_
         st.error("No valid URLs found in the CSV (filtered to 200 status, text/html, indexable).")
         return
 
-    st.info(f"Found **{len(csv_entries)}** valid URLs in CSV.")
+    total_parsed = len(csv_entries)
+
+    # -- Apply content filters ---------------------------------------------
+    filter_log = []
+
+    if dedup_enabled:
+        csv_entries, dupes = deduplicate_entries(csv_entries)
+        if dupes:
+            filter_log.append(f"Removed **{len(dupes)}** duplicate pages (canonical/hash)")
+
+    if near_dupes_enabled:
+        csv_entries, near_dupes = filter_near_duplicates(csv_entries, near_dupe_threshold)
+        if near_dupes:
+            filter_log.append(
+                f"Removed **{len(near_dupes)}** near-duplicate pages "
+                f"(>={near_dupe_threshold:.0f}% similarity)"
+            )
+
+    if thin_content_enabled:
+        csv_entries, thin = filter_thin_content(csv_entries, min_word_count)
+        if thin:
+            filter_log.append(
+                f"Removed **{len(thin)}** thin-content pages (<{min_word_count} words)"
+            )
+
+    # -- Show filter summary -----------------------------------------------
+    if filter_log:
+        with st.expander("Content Filtering", expanded=True):
+            st.markdown(f"**{total_parsed}** pages parsed from CSV")
+            for msg in filter_log:
+                st.markdown(f"- {msg}")
+            st.markdown(f"**{len(csv_entries)}** pages remaining after filters")
+    else:
+        st.info(f"Found **{total_parsed}** valid URLs in CSV.")
+
+    if not csv_entries:
+        st.error("No pages remaining after filtering.")
+        return
 
     progress_bar = st.progress(0, text="Processing URLs...")
 
