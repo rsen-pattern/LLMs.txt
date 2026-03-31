@@ -49,6 +49,22 @@ OPTIONAL_DEPTH_THRESHOLD = 4
 OPTIONAL_INLINKS_THRESHOLD = 1
 OPTIONAL_LINK_SCORE_THRESHOLD = 5
 
+PATTERN_CATALOG = "catalog"
+PATTERN_WORKFLOW = "workflow"
+PATTERN_INDEX_EXPORT = "index_export"
+
+CATALOG_SECTIONS = [
+    "Getting Started", "Core Concepts", "Guides", "API Reference",
+    "Integrations", "Resources", "Optional",
+]
+WORKFLOW_SECTIONS = [
+    "Quickstart", "Setup & Configuration", "Features", "Workflows",
+    "Troubleshooting", "Reference", "Optional",
+]
+INDEX_EXPORT_SECTIONS = [
+    "Overview", "Documentation", "Tutorials", "API", "Examples", "Optional",
+]
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -83,48 +99,87 @@ def _url_to_section(url: str) -> str:
     return first_segment.replace("-", " ").replace("_", " ").title()
 
 
-def _group_into_sections(
+def _page_importance_score(r: Dict) -> float:
+    link_score = r.get("link_score", 0)
+    unique_inlinks = r.get("unique_inlinks", 0)
+    crawl_depth = r.get("crawl_depth", 0)
+    word_count = r.get("word_count", 0)
+    depth_score = max(0, 100 - crawl_depth * 20)
+    inlinks_score = min(unique_inlinks * 10, 100)
+    content_score = min(word_count / 10, 100) if word_count > 0 else 50
+    return (link_score * 0.4) + (inlinks_score * 0.3) + (depth_score * 0.2) + (content_score * 0.1)
+
+
+def _is_optional_page(r: Dict) -> bool:
+    crawl_depth = r.get("crawl_depth", 0)
+    unique_inlinks = r.get("unique_inlinks", 0)
+    link_score = r.get("link_score", 0)
+    is_deep = crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
+    is_low_importance = (
+        unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+        or (link_score > 0 and link_score <= OPTIONAL_LINK_SCORE_THRESHOLD)
+    )
+    return is_deep and is_low_importance
+
+
+def _group_into_sections_by_url(
     results: List[Dict],
-) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
-    sections: Dict[str, List[Dict]] = defaultdict(list)
+) -> Tuple[Dict[str, Dict], List[Dict]]:
+    """Fallback: group by URL path segments, returns new section format."""
+    sections: Dict[str, Dict] = {}
     optional: List[Dict] = []
 
     for r in results:
-        crawl_depth = r.get("crawl_depth", 0)
-        unique_inlinks = r.get("unique_inlinks", 0)
-        link_score = r.get("link_score", 0)
-
-        is_deep = crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
-        is_low_importance = (
-            unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
-            or (link_score > 0 and link_score <= OPTIONAL_LINK_SCORE_THRESHOLD)
-        )
-        is_optional = is_deep and is_low_importance
-
-        if is_optional:
+        if _is_optional_page(r):
             optional.append(r)
         else:
-            sections[_url_to_section(r["url"])].append(r)
+            name = _url_to_section(r["url"])
+            if name not in sections:
+                sections[name] = {"description": "", "pages": []}
+            sections[name]["pages"].append(r)
 
-    return dict(sections), optional
+    for name in sections:
+        sections[name]["pages"].sort(key=_page_importance_score, reverse=True)
+    optional.sort(key=_page_importance_score, reverse=True)
+
+    return sections, optional
 
 
 def _format_spec_llmstxt(
     site_url: str,
     site_name: str,
     site_summary: str,
-    sections: Dict[str, List[Dict]],
+    sections: Dict[str, Dict],
     optional: List[Dict],
+    pattern: str = PATTERN_CATALOG,
 ) -> str:
     lines = [f"# {site_name}\n"]
     if site_summary:
         lines.append(f"> {site_summary}\n")
 
-    section_order = sorted(sections.keys(), key=lambda s: (s != "Main", s))
+    if pattern == PATTERN_WORKFLOW:
+        template_order = WORKFLOW_SECTIONS
+    elif pattern == PATTERN_INDEX_EXPORT:
+        template_order = INDEX_EXPORT_SECTIONS
+    else:
+        template_order = CATALOG_SECTIONS
+
+    template_names = [s for s in template_order if s in sections and s != "Optional"]
+    remaining = sorted([s for s in sections if s not in template_order and s != "Optional"])
+    section_order = template_names + remaining
+
     for section_name in section_order:
-        items = sections[section_name]
-        lines.append(f"\n## {section_name}\n")
-        for r in items:
+        section_data = sections[section_name]
+        pages = section_data.get("pages", [])
+        description = section_data.get("description", "")
+        if not pages:
+            continue
+        lines.append(f"\n## {section_name}")
+        if description:
+            lines.append(f"\n{description}\n")
+        else:
+            lines.append("")
+        for r in pages:
             lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
 
     if optional:
@@ -431,6 +486,7 @@ class LLMsTextGenerator:
         csv_entries: Optional[List[Dict]] = None,
         max_urls: int = 100, scrape: bool = False,
         generate_full: bool = True, use_ai: bool = True,
+        pattern: str = PATTERN_CATALOG,
     ) -> Dict:
         """Unified generation method for both modes."""
         if csv_entries:
@@ -493,9 +549,9 @@ class LLMsTextGenerator:
         site_name, site_summary = self.generate_site_summary(site_url, page_titles)
 
         # Group into sections
-        sections, optional = _group_into_sections(all_results)
+        sections, optional = _group_into_sections_by_url(all_results)
 
-        llmstxt = _format_spec_llmstxt(site_url, site_name, site_summary, sections, optional)
+        llmstxt = _format_spec_llmstxt(site_url, site_name, site_summary, sections, optional, pattern)
 
         llms_fulltxt = ""
         if generate_full and any(r.get("markdown") for r in all_results):
@@ -537,6 +593,9 @@ def main():
                         help="Directory to save output files")
     parser.add_argument("--firecrawl-api-key", default=os.getenv("FIRECRAWL_API_KEY"))
     parser.add_argument("--bifrost-api-key", default=os.getenv("BIFROST_API_KEY"))
+    parser.add_argument("--pattern", choices=[PATTERN_CATALOG, PATTERN_WORKFLOW, PATTERN_INDEX_EXPORT],
+                        default=PATTERN_CATALOG,
+                        help="Output pattern: catalog (Stripe-style), workflow (Cursor-style), or index_export (Anthropic-style)")
     parser.add_argument("--no-full-text", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
@@ -583,6 +642,7 @@ def main():
             scrape=args.scrape,
             generate_full=not args.no_full_text,
             use_ai=not args.no_ai,
+            pattern=args.pattern,
         )
 
         os.makedirs(args.output_dir, exist_ok=True)

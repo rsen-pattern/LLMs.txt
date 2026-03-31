@@ -242,52 +242,88 @@ OPTIONAL_INLINKS_THRESHOLD = 1
 # Pages with link score <= this are candidates for Optional (0-100 scale, like PageRank)
 OPTIONAL_LINK_SCORE_THRESHOLD = 5
 
+# Output pattern types
+PATTERN_CATALOG = "catalog"
+PATTERN_WORKFLOW = "workflow"
+PATTERN_INDEX_EXPORT = "index_export"
+
+# Semantic section templates per pattern
+CATALOG_SECTIONS = [
+    "Getting Started", "Core Concepts", "Guides", "API Reference",
+    "Integrations", "Resources", "Optional",
+]
+WORKFLOW_SECTIONS = [
+    "Quickstart", "Setup & Configuration", "Features", "Workflows",
+    "Troubleshooting", "Reference", "Optional",
+]
+INDEX_EXPORT_SECTIONS = [
+    "Overview", "Documentation", "Tutorials", "API", "Examples", "Optional",
+]
+
 
 def _url_to_section(url: str) -> str:
     """Derive a section name from the first path segment of a URL.
 
-    e.g. https://example.com/docs/setup -> "Docs"
-         https://example.com/blog/post  -> "Blog"
-         https://example.com/           -> "Main"
+    Used as a fallback when AI grouping is not available.
     """
     path = urlparse(url).path.strip("/")
     if not path:
         return "Main"
     first_segment = path.split("/")[0]
-    # Capitalise and clean up common slug patterns
     return first_segment.replace("-", " ").replace("_", " ").title()
 
 
-def _group_into_sections(
+def _page_importance_score(r: Dict) -> float:
+    """Compute a composite importance score for sorting within sections.
+
+    Higher = more important. Combines Link Score, Unique Inlinks,
+    and inverse Crawl Depth.
+    """
+    link_score = r.get("link_score", 0)
+    unique_inlinks = r.get("unique_inlinks", 0)
+    crawl_depth = r.get("crawl_depth", 0)
+    word_count = r.get("word_count", 0)
+
+    # Normalize each signal to roughly 0-100 range, then weight
+    depth_score = max(0, 100 - crawl_depth * 20)  # shallow = high score
+    inlinks_score = min(unique_inlinks * 10, 100)
+    content_score = min(word_count / 10, 100) if word_count > 0 else 50
+
+    return (link_score * 0.4) + (inlinks_score * 0.3) + (depth_score * 0.2) + (content_score * 0.1)
+
+
+def _is_optional_page(r: Dict) -> bool:
+    """Determine if a page should go in the Optional section."""
+    crawl_depth = r.get("crawl_depth", 0)
+    unique_inlinks = r.get("unique_inlinks", 0)
+    link_score = r.get("link_score", 0)
+
+    is_deep = crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
+    is_low_importance = (
+        unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+        or (link_score > 0 and link_score <= OPTIONAL_LINK_SCORE_THRESHOLD)
+    )
+    return is_deep and is_low_importance
+
+
+def _group_into_sections_by_url(
     results: List[Dict],
 ) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
-    """Split processed results into named sections + an Optional list.
-
-    Pages are marked optional if they have high crawl depth AND low inlinks
-    (or low Link Score), indicating secondary/deep content that can be
-    skipped for shorter context.
-    """
+    """Fallback: group by URL path segments."""
     sections: Dict[str, List[Dict]] = {}
     optional: List[Dict] = []
 
     for r in results:
-        crawl_depth = r.get("crawl_depth", 0)
-        unique_inlinks = r.get("unique_inlinks", 0)
-        link_score = r.get("link_score", 0)
-
-        # A page is optional if it's deep AND has low importance signals
-        is_deep = crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
-        is_low_importance = (
-            unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
-            or (link_score > 0 and link_score <= OPTIONAL_LINK_SCORE_THRESHOLD)
-        )
-        is_optional = is_deep and is_low_importance
-
-        if is_optional:
+        if _is_optional_page(r):
             optional.append(r)
         else:
             section = _url_to_section(r["url"])
             sections.setdefault(section, []).append(r)
+
+    # Sort pages within each section by importance
+    for section_name in sections:
+        sections[section_name].sort(key=_page_importance_score, reverse=True)
+    optional.sort(key=_page_importance_score, reverse=True)
 
     return sections, optional
 
@@ -296,30 +332,49 @@ def _format_spec_llmstxt(
     site_url: str,
     site_name: str,
     site_summary: str,
-    sections: Dict[str, List[Dict]],
+    sections: Dict[str, Dict],
     optional: List[Dict],
+    pattern: str = PATTERN_CATALOG,
 ) -> str:
-    """Build an llms.txt string that follows the Jeremy Howard spec:
+    """Build an llms.txt string following the spec with section descriptions.
 
-    # Site Name
-    > Short summary
-    ## Section
-    - [Title](url): Description
-    ## Optional
-    - [Title](url): Description
+    sections is a dict of {name: {"description": str, "pages": [...]}}
     """
     lines = [f"# {site_name}\n"]
 
     if site_summary:
         lines.append(f"> {site_summary}\n")
 
-    # Sort sections: "Main" first, then alphabetical
-    section_order = sorted(sections.keys(), key=lambda s: (s != "Main", s))
+    # Determine section ordering based on pattern template
+    if pattern == PATTERN_WORKFLOW:
+        template_order = WORKFLOW_SECTIONS
+    elif pattern == PATTERN_INDEX_EXPORT:
+        template_order = INDEX_EXPORT_SECTIONS
+    else:
+        template_order = CATALOG_SECTIONS
+
+    # Order: template sections first (in template order), then remaining alphabetically
+    template_names = [s for s in template_order if s in sections and s != "Optional"]
+    remaining = sorted(
+        [s for s in sections if s not in template_order and s != "Optional"]
+    )
+    section_order = template_names + remaining
 
     for section_name in section_order:
-        items = sections[section_name]
-        lines.append(f"\n## {section_name}\n")
-        for r in items:
+        section_data = sections[section_name]
+        pages = section_data.get("pages", [])
+        description = section_data.get("description", "")
+
+        if not pages:
+            continue
+
+        lines.append(f"\n## {section_name}")
+        if description:
+            lines.append(f"\n{description}\n")
+        else:
+            lines.append("")
+
+        for r in pages:
             lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
 
     if optional:
@@ -482,10 +537,14 @@ class LLMsTextGenerator:
             return "Page", "No description available"
 
         prompt = (
-            f"Generate a 9-10 word description and a 3-4 word title of the entire "
-            f"page based on ALL the content for this url: {url}. "
-            f"This will help a user find the page for its intended purpose.\n\n"
-            f'Return JSON: {{"title": "3-4 word title", "description": "9-10 word description"}}\n\n'
+            f"Generate a concise title and an action-oriented description for this web page.\n\n"
+            f"URL: {url}\n\n"
+            f"Rules:\n"
+            f"- Title: 3-5 words, descriptive (not generic like 'Documentation' or 'Page')\n"
+            f"- Description: 8-12 words, action-oriented, explains what the user can learn or do\n"
+            f"- Good example: title='Payment Methods API', description='Learn how to accept and manage different payment methods'\n"
+            f"- Bad example: title='Page', description='This page contains information about the topic'\n\n"
+            f'Return JSON: {{"title": "Descriptive Title", "description": "Action-oriented description of the page."}}\n\n'
             f"Page content:\n{markdown[:4000]}"
         )
         try:
@@ -504,19 +563,23 @@ class LLMsTextGenerator:
         self, url: str, title: str, description: str
     ) -> Tuple[str, str]:
         if not self.llm_client:
-            short_title = " ".join(title.split()[:4]) if title else "Page"
+            short_title = " ".join(title.split()[:5]) if title else "Page"
             short_desc = (
-                " ".join(description.split()[:10])
+                " ".join(description.split()[:12])
                 if description
                 else "No description available"
             )
             return short_title, short_desc
 
         prompt = (
-            f"Based on the following page metadata, generate a concise 3-4 word title "
-            f"and a 9-10 word description.\n\n"
+            f"Rewrite this page's title and description to be concise and action-oriented.\n\n"
             f"URL: {url}\nExisting Title: {title}\nExisting Description: {description}\n\n"
-            f'Return JSON: {{"title": "3-4 word title", "description": "9-10 word description"}}'
+            f"Rules:\n"
+            f"- Title: 3-5 words, descriptive (not generic)\n"
+            f"- Description: 8-12 words, action-oriented, explains what the user can learn or do\n"
+            f"- Good: 'Simulate payments to test your integration'\n"
+            f"- Bad: 'Information about testing'\n\n"
+            f'Return JSON: {{"title": "Descriptive Title", "description": "Action-oriented description."}}'
         )
         try:
             result = self._call_llm(
@@ -536,15 +599,12 @@ class LLMsTextGenerator:
             )
             return short_title, short_desc
 
-    # -- Site summary generator ------------------------------------------------
+    # -- Site summary & section grouping via AI --------------------------------
 
     def generate_site_summary(
         self, site_url: str, page_titles: List[str]
     ) -> Tuple[str, str]:
-        """Generate a site name and one-line summary using AI.
-
-        Returns (site_name, summary).
-        """
+        """Generate a site name and one-line summary using AI."""
         domain = urlparse(site_url).netloc.replace("www.", "")
 
         if not self.llm_client:
@@ -571,6 +631,109 @@ class LLMsTextGenerator:
         except Exception as e:
             logger.error(f"Error generating site summary: {e}")
             return domain, ""
+
+    def generate_semantic_sections(
+        self, results: List[Dict], pattern: str = PATTERN_CATALOG
+    ) -> Tuple[Dict[str, Dict], List[Dict]]:
+        """Use AI to group pages into semantic sections with descriptions.
+
+        Returns ({section_name: {"description": str, "pages": [...]}}, optional_pages)
+        """
+        # Separate optional pages first
+        optional = [r for r in results if _is_optional_page(r)]
+        main_pages = [r for r in results if not _is_optional_page(r)]
+
+        if not self.llm_client or not main_pages:
+            # Fallback: URL-based grouping wrapped in new format
+            url_sections, url_optional = _group_into_sections_by_url(results)
+            sections = {
+                name: {"description": "", "pages": pages}
+                for name, pages in url_sections.items()
+            }
+            return sections, url_optional
+
+        # Build page summaries for AI
+        page_list = []
+        for i, r in enumerate(main_pages[:80]):  # Cap at 80 to fit context
+            page_list.append(
+                f'{i}: "{r["title"]}" - {r["url"]} - {r["description"]}'
+            )
+        pages_text = "\n".join(page_list)
+
+        if pattern == PATTERN_WORKFLOW:
+            template_hint = "Organize around workflows and tasks: Quickstart, Setup & Configuration, Features, Workflows, Troubleshooting, Reference."
+        elif pattern == PATTERN_INDEX_EXPORT:
+            template_hint = "Organize as a documentation index: Overview, Documentation, Tutorials, API, Examples."
+        else:
+            template_hint = "Organize as a product catalog: Getting Started, Core Concepts, Guides, API Reference, Integrations, Resources."
+
+        prompt = (
+            f"Group these web pages into 3-7 semantic sections for an llms.txt file.\n\n"
+            f"Pattern guidance: {template_hint}\n\n"
+            f"Pages:\n{pages_text}\n\n"
+            f"For each section, provide:\n"
+            f"- A clear section name (2-3 words)\n"
+            f"- A one-sentence description of what this section covers\n"
+            f"- The page indices that belong to it\n\n"
+            f"Return JSON: {{"
+            f'"sections": ['
+            f'{{"name": "Section Name", "description": "One sentence about this section.", "page_indices": [0, 1, 2]}}'
+            f"]"
+            f"}}"
+        )
+
+        try:
+            result = self._call_llm(
+                prompt,
+                "You organize web pages into logical sections for llms.txt files. "
+                "Create meaningful groupings that help AI tools navigate the content. "
+                "Every page index must appear in exactly one section.",
+            )
+
+            ai_sections = result.get("sections", [])
+            if not ai_sections:
+                raise ValueError("No sections returned")
+
+            # Build section dict
+            assigned_indices = set()
+            sections: Dict[str, Dict] = {}
+            for s in ai_sections:
+                name = s.get("name", "Other")
+                desc = s.get("description", "")
+                indices = s.get("page_indices", [])
+                pages = []
+                for idx in indices:
+                    if 0 <= idx < len(main_pages) and idx not in assigned_indices:
+                        pages.append(main_pages[idx])
+                        assigned_indices.add(idx)
+                if pages:
+                    pages.sort(key=_page_importance_score, reverse=True)
+                    sections[name] = {"description": desc, "pages": pages}
+
+            # Add any unassigned pages to an "Other" section
+            unassigned = [
+                main_pages[i]
+                for i in range(len(main_pages))
+                if i not in assigned_indices
+            ]
+            if unassigned:
+                unassigned.sort(key=_page_importance_score, reverse=True)
+                if "Other" in sections:
+                    sections["Other"]["pages"].extend(unassigned)
+                else:
+                    sections["Other"] = {"description": "", "pages": unassigned}
+
+            optional.sort(key=_page_importance_score, reverse=True)
+            return sections, optional
+
+        except Exception as e:
+            logger.error(f"AI section grouping failed, falling back to URL-based: {e}")
+            url_sections, url_optional = _group_into_sections_by_url(results)
+            sections = {
+                name: {"description": "", "pages": pages}
+                for name, pages in url_sections.items()
+            }
+            return sections, url_optional
 
     # -- URL processors -----------------------------------------------------
 
@@ -623,6 +786,7 @@ class LLMsTextGenerator:
         url: str,
         max_urls: int = 100,
         generate_full: bool = True,
+        pattern: str = PATTERN_CATALOG,
         progress_callback=None,
     ) -> Dict[str, str]:
         urls = self.map_website(url, max_urls)
@@ -634,6 +798,7 @@ class LLMsTextGenerator:
             items=[(u, i) for i, u in enumerate(urls)],
             processor=lambda item: self.process_url_firecrawl(item[0], item[1]),
             generate_full=generate_full,
+            pattern=pattern,
             progress_callback=progress_callback,
         )
 
@@ -644,26 +809,31 @@ class LLMsTextGenerator:
         scrape: bool = False,
         generate_full: bool = True,
         use_ai: bool = True,
+        pattern: str = PATTERN_CATALOG,
         progress_callback=None,
     ) -> Dict[str, str]:
         if not csv_entries:
             raise ValueError("No valid URLs found in CSV data")
 
         if not use_ai and not scrape:
-            return self._build_from_metadata(site_url, csv_entries, generate_full)
+            return self._build_from_metadata(
+                site_url, csv_entries, generate_full, pattern
+            )
 
         return self._process_urls(
             site_url=site_url,
             items=[(entry, i) for i, entry in enumerate(csv_entries)],
             processor=lambda item: self.process_url_csv(item[0], item[1], scrape),
             generate_full=generate_full,
+            pattern=pattern,
             progress_callback=progress_callback,
         )
 
     # -- Internal helpers ---------------------------------------------------
 
     def _process_urls(
-        self, site_url, items, processor, generate_full, progress_callback=None
+        self, site_url, items, processor, generate_full,
+        pattern=PATTERN_CATALOG, progress_callback=None,
     ) -> Dict[str, str]:
         batch_size = 10
         all_results = []
@@ -695,11 +865,13 @@ class LLMsTextGenerator:
         site_name, site_summary = self.generate_site_summary(site_url, page_titles)
 
         return self._format_output(
-            site_url, site_name, site_summary, all_results, generate_full, total
+            site_url, site_name, site_summary, all_results, generate_full,
+            total, pattern,
         )
 
     def _build_from_metadata(
-        self, site_url: str, csv_entries: List[Dict], generate_full: bool
+        self, site_url: str, csv_entries: List[Dict], generate_full: bool,
+        pattern: str = PATTERN_CATALOG,
     ) -> Dict[str, str]:
         """Build output directly from CSV metadata — no API calls."""
         all_results = []
@@ -724,12 +896,15 @@ class LLMsTextGenerator:
                     "crawl_depth": entry.get("crawl_depth", 0),
                     "inlinks": entry.get("inlinks", 0),
                     "unique_inlinks": entry.get("unique_inlinks", 0),
+                    "link_score": entry.get("link_score", 0),
+                    "word_count": entry.get("word_count", 0),
                 }
             )
 
         domain = urlparse(site_url).netloc.replace("www.", "")
         return self._format_output(
-            site_url, domain, "", all_results, generate_full, len(csv_entries)
+            site_url, domain, "", all_results, generate_full, len(csv_entries),
+            pattern,
         )
 
     def _format_output(
@@ -740,18 +915,19 @@ class LLMsTextGenerator:
         results: List[Dict],
         generate_full: bool,
         total: int,
+        pattern: str = PATTERN_CATALOG,
     ) -> Dict[str, str]:
-        """Produce spec-compliant llms.txt with sections and optional."""
-        sections, optional = _group_into_sections(results)
+        """Produce spec-compliant llms.txt with semantic sections."""
+        # Use AI grouping when available, fallback to URL-based
+        sections, optional = self.generate_semantic_sections(results, pattern)
 
         llmstxt = _format_spec_llmstxt(
-            site_url, site_name, site_summary, sections, optional
+            site_url, site_name, site_summary, sections, optional, pattern
         )
 
         llms_fulltxt = ""
         if generate_full:
             llms_fulltxt = _format_spec_llms_full(site_name, results)
-            # Only keep if there's actual content
             if not any(r.get("markdown") for r in results):
                 llms_fulltxt = ""
 
@@ -805,6 +981,25 @@ def main():
         st.divider()
         st.header("General Settings")
         st.caption("Applies to both Firecrawl and Screaming Frog CSV modes")
+
+        pattern = st.selectbox(
+            "Output pattern",
+            options=[
+                ("Catalog (multi-product, API-centric)", PATTERN_CATALOG),
+                ("Workflow (dev tools, IDE integrations)", PATTERN_WORKFLOW),
+                ("Index + Export (dense docs, AI-native)", PATTERN_INDEX_EXPORT),
+            ],
+            format_func=lambda x: x[0],
+            index=0,
+            help=(
+                "**Catalog**: Groups by product area — Getting Started, Core Concepts, "
+                "Guides, API Reference. Best for multi-product platforms (Stripe, Cloudflare).\n\n"
+                "**Workflow**: Groups by developer tasks — Quickstart, Setup, Features, "
+                "Troubleshooting. Best for dev tools (Cursor, Windsurf).\n\n"
+                "**Index + Export**: Groups as doc index — Overview, Documentation, "
+                "Tutorials, API, Examples. Best for dense docs (Anthropic, LangGraph)."
+            ),
+        )[1]
 
         max_urls = st.number_input(
             "Max URLs to process",
@@ -878,7 +1073,7 @@ def main():
             elif not bifrost_key:
                 st.error("Bifrost API key is required for AI summaries.")
             else:
-                _run_firecrawl(fc_url, firecrawl_key, bifrost_key, max_urls, generate_full)
+                _run_firecrawl(fc_url, firecrawl_key, bifrost_key, max_urls, generate_full, pattern)
 
     # -- CSV tab -----------------------------------------------------------
     with tab_csv:
@@ -933,6 +1128,7 @@ def main():
                     generate_full,
                     use_ai,
                     scrape_content,
+                    pattern=pattern,
                     dedup_enabled=dedup_enabled,
                     near_dupes_enabled=near_dupes_enabled,
                     near_dupe_threshold=float(near_dupe_threshold),
@@ -946,7 +1142,7 @@ def main():
 # ---------------------------------------------------------------------------
 
 
-def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full):
+def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full, pattern=PATTERN_CATALOG):
     """Execute Firecrawl-based generation and display results."""
     generator = LLMsTextGenerator(
         firecrawl_api_key=firecrawl_key,
@@ -962,7 +1158,7 @@ def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full):
     try:
         status.info("Discovering URLs via Firecrawl...")
         result = generator.generate_from_firecrawl(
-            url, max_urls, generate_full, progress_callback=on_progress
+            url, max_urls, generate_full, pattern=pattern, progress_callback=on_progress
         )
         progress_bar.progress(1.0, text="Done!")
         _display_results(result, url)
@@ -972,8 +1168,9 @@ def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full):
 
 def _run_csv(
     url, uploaded_file, firecrawl_key, bifrost_key, max_urls, generate_full,
-    use_ai, scrape, dedup_enabled=True, near_dupes_enabled=False,
-    near_dupe_threshold=90.0, thin_content_enabled=False, min_word_count=50,
+    use_ai, scrape, pattern=PATTERN_CATALOG, dedup_enabled=True,
+    near_dupes_enabled=False, near_dupe_threshold=90.0,
+    thin_content_enabled=False, min_word_count=50,
 ):
     """Execute CSV-based generation with filtering and display results."""
     generator = LLMsTextGenerator(
@@ -1043,6 +1240,7 @@ def _run_csv(
             scrape=scrape,
             generate_full=generate_full,
             use_ai=use_ai,
+            pattern=pattern,
             progress_callback=on_progress if (use_ai or scrape) else None,
         )
         progress_bar.progress(1.0, text="Done!")
