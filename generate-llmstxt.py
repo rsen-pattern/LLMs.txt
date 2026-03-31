@@ -27,10 +27,15 @@ from urllib.parse import urlparse
 
 import requests
 from openai import OpenAI
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv is optional
+
+BIFROST_BASE_URL = "https://bifrost.pattern.com"
+BIFROST_MODEL = "openai/gpt-4o-mini"
 
 # Configure logging
 logging.basicConfig(
@@ -129,11 +134,15 @@ class LLMsTextGenerator:
     def __init__(
         self,
         firecrawl_api_key: Optional[str] = None,
-        openai_api_key: Optional[str] = None,
+        bifrost_api_key: Optional[str] = None,
     ):
         """Initialize the generator with API keys."""
         self.firecrawl_api_key = firecrawl_api_key
-        self.openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
+        self.openai_client = (
+            OpenAI(base_url=BIFROST_BASE_URL, api_key=bifrost_api_key)
+            if bifrost_api_key
+            else None
+        )
         self.firecrawl_base_url = "https://api.firecrawl.dev/v1"
         self.headers = (
             {
@@ -229,7 +238,7 @@ Return the response in JSON format:
 
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=BIFROST_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -284,7 +293,7 @@ Return the response in JSON format:
 
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=BIFROST_MODEL,
                 messages=[
                     {
                         "role": "system",
@@ -584,9 +593,9 @@ def main():
         help="Firecrawl API key (default: from FIRECRAWL_API_KEY env var)",
     )
     parser.add_argument(
-        "--openai-api-key",
-        default=os.getenv("OPENAI_API_KEY"),
-        help="OpenAI API key (default: from OPENAI_API_KEY env var)",
+        "--bifrost-api-key",
+        default=os.getenv("BIFROST_API_KEY"),
+        help="Patterns Bifrost API key (default: from BIFROST_API_KEY env var)",
     )
     parser.add_argument(
         "--no-full-text",
@@ -607,7 +616,7 @@ def main():
     # Validate API keys based on mode
     using_csv = args.csv_path is not None
     needs_firecrawl = not using_csv or args.scrape
-    needs_openai = not args.no_ai
+    needs_bifrost = not args.no_ai
 
     if needs_firecrawl and not args.firecrawl_api_key:
         logger.error(
@@ -616,24 +625,24 @@ def main():
         )
         sys.exit(1)
 
-    if needs_openai and not args.openai_api_key:
+    if needs_bifrost and not args.bifrost_api_key:
         if using_csv:
             logger.warning(
-                "OpenAI API key not provided. Using CSV metadata directly for titles/descriptions. "
-                "Use --openai-api-key for AI-generated summaries."
+                "Bifrost API key not provided. Using CSV metadata directly for titles/descriptions. "
+                "Use --bifrost-api-key for AI-generated summaries."
             )
             args.no_ai = True
         else:
             logger.error(
-                "OpenAI API key not provided. "
-                "Set OPENAI_API_KEY environment variable or use --openai-api-key"
+                "Bifrost API key not provided. "
+                "Set BIFROST_API_KEY environment variable or use --bifrost-api-key"
             )
             sys.exit(1)
 
     # Create generator
     generator = LLMsTextGenerator(
         firecrawl_api_key=args.firecrawl_api_key if needs_firecrawl else None,
-        openai_api_key=args.openai_api_key if not args.no_ai else None,
+        bifrost_api_key=args.bifrost_api_key if not args.no_ai else None,
     )
 
     try:
