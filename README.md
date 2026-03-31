@@ -8,10 +8,28 @@ A **Streamlit** web app that generates `llms.txt` and `llms-full.txt` files for 
 
 ## What is llms.txt?
 
-`llms.txt` is a standardized format for making website content more accessible to Large Language Models (LLMs):
+`llms.txt` is a [standardized format](https://llmstxt.org/) proposed by Jeremy Howard for making website content accessible to LLMs. This tool generates **spec-compliant** output:
 
-- **llms.txt** — A concise index of pages with titles and descriptions
-- **llms-full.txt** — Complete markdown content of all pages
+```markdown
+# Site Name
+
+> One-sentence summary of what this site/product does.
+
+## Docs
+
+- [Quick Start](https://example.com/docs/quickstart): Getting started guide for new users
+
+## Blog
+
+- [Release Notes](https://example.com/blog/releases): Latest product updates and changelogs
+
+## Optional
+
+- [Careers](https://example.com/careers): Open roles at the company
+```
+
+- **`llms.txt`** — Curated index with H1 title, blockquote summary, H2 sections, and `## Optional` for lower-priority pages
+- **`llms-full.txt`** — Complete markdown content of all pages
 
 ## Quick Start
 
@@ -86,30 +104,69 @@ The parser reads these columns (case-insensitive):
 | Column | Used For |
 |--------|----------|
 | `Address` | The page URL |
-| `Status Code` | Filters to 200 responses |
-| `Content Type` | Filters to `text/html` |
+| `Status Code` | Filters to 200 responses only |
+| `Content Type` | Filters to `text/html` pages only |
 | `Indexability` | Skips non-indexable pages |
-| `Title 1` | Page title |
-| `Meta Description 1` | Page description |
-| `H1-1` | Fallback title |
+| `Title 1` | Page title (used in link text) |
+| `Meta Description 1` | Page description (used in link description) |
+| `H1-1` | Fallback title if Title 1 is empty |
+| `Crawl Depth` | Pages at depth 4+ with low inlinks go into `## Optional` section |
+| `Inlinks` | Total internal links pointing to the page |
+| `Unique Inlinks` | Unique pages linking to this page — used for importance ranking |
+
+### Automatic Section Grouping
+
+Pages are automatically grouped under **H2 sections** based on their URL path:
+
+- `https://example.com/docs/setup` -> `## Docs`
+- `https://example.com/blog/post` -> `## Blog`
+- `https://example.com/pricing` -> `## Pricing`
+- `https://example.com/` -> `## Main`
+
+Pages with **high crawl depth (4+)** and **low unique inlinks (<=1)** are automatically placed in the `## Optional` section per the llms.txt spec, indicating they can be skipped for shorter context.
+
+### Validation
+
+The tool validates your generated llms.txt and warns about:
+- File size over 50 KB (recommended max for LLM context efficiency)
+- Missing H1 title (required by spec)
+- Relative URLs (must be absolute)
+- Missing blockquote summary
+- Missing H2 sections
 
 ## Output Format
 
-### llms.txt
+### llms.txt (spec-compliant)
 
-```
-# https://example.com llms.txt
+```markdown
+# Site Name
 
-- [Page Title](https://example.com/page): Brief description of the page content
+> One-sentence summary of the site.
+
+## Docs
+
+- [Quick Start](https://example.com/docs/quickstart): Getting started guide for new users
+
+## Blog
+
+- [Release Notes](https://example.com/blog/releases): Latest updates and changelogs
+
+## Optional
+
+- [Deep Nested Page](https://example.com/docs/advanced/internals/api): Low-traffic internal API docs
 ```
 
 ### llms-full.txt
 
-```
-# https://example.com llms-full.txt
+```markdown
+# Site Name
 
-<|page-1-llmstxt|>
-## Page Title
+---
+
+## Quick Start
+
+Source: https://example.com/docs/quickstart
+
 Full markdown content of the page...
 ```
 

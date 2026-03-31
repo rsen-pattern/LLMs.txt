@@ -42,8 +42,20 @@ def get_llm_client(api_key: str) -> OpenAI:
 # ---------------------------------------------------------------------------
 
 
+def _safe_int(val: str) -> int:
+    """Parse a string to int, returning 0 on failure."""
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return 0
+
+
 def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict]:
-    """Parse a Screaming Frog 'Internal All' CSV from an in-memory string."""
+    """Parse a Screaming Frog 'Internal All' CSV from an in-memory string.
+
+    Extracts enriched metadata including Crawl Depth, Inlinks, and
+    Unique Inlinks for page-importance ranking and section grouping.
+    """
     reader = csv.DictReader(io.StringIO(file_contents))
 
     if reader.fieldnames is None:
@@ -87,12 +99,20 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
         h1 = get_field(row, "H1-1", "H1", "h1-1", "h1")
         word_count = get_field(row, "Word Count", "word count")
 
+        # Enriched columns for importance / grouping
+        crawl_depth = get_field(row, "Crawl Depth", "crawl depth")
+        inlinks = get_field(row, "Inlinks", "inlinks")
+        unique_inlinks = get_field(row, "Unique Inlinks", "unique inlinks")
+
         results.append(
             {
                 "url": address,
                 "title": title or h1 or "",
                 "description": description or "",
-                "word_count": int(word_count) if word_count.isdigit() else 0,
+                "word_count": _safe_int(word_count),
+                "crawl_depth": _safe_int(crawl_depth),
+                "inlinks": _safe_int(inlinks),
+                "unique_inlinks": _safe_int(unique_inlinks),
             }
         )
 
@@ -100,6 +120,159 @@ def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict
             break
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Section grouping & spec-compliant formatting
+# ---------------------------------------------------------------------------
+
+# Pages at crawl depth >= this threshold go into the "## Optional" section
+OPTIONAL_DEPTH_THRESHOLD = 4
+# Pages with unique inlinks <= this go into Optional (low internal importance)
+OPTIONAL_INLINKS_THRESHOLD = 1
+
+
+def _url_to_section(url: str) -> str:
+    """Derive a section name from the first path segment of a URL.
+
+    e.g. https://example.com/docs/setup -> "Docs"
+         https://example.com/blog/post  -> "Blog"
+         https://example.com/           -> "Main"
+    """
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return "Main"
+    first_segment = path.split("/")[0]
+    # Capitalise and clean up common slug patterns
+    return first_segment.replace("-", " ").replace("_", " ").title()
+
+
+def _group_into_sections(
+    results: List[Dict],
+) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
+    """Split processed results into named sections + an Optional list.
+
+    Pages are marked optional if they have high crawl depth AND low inlinks,
+    indicating secondary/deep content that can be skipped for shorter context.
+    """
+    sections: Dict[str, List[Dict]] = {}
+    optional: List[Dict] = []
+
+    for r in results:
+        crawl_depth = r.get("crawl_depth", 0)
+        unique_inlinks = r.get("unique_inlinks", 0)
+
+        is_optional = (
+            crawl_depth >= OPTIONAL_DEPTH_THRESHOLD
+            and unique_inlinks <= OPTIONAL_INLINKS_THRESHOLD
+        )
+
+        if is_optional:
+            optional.append(r)
+        else:
+            section = _url_to_section(r["url"])
+            sections.setdefault(section, []).append(r)
+
+    return sections, optional
+
+
+def _format_spec_llmstxt(
+    site_url: str,
+    site_name: str,
+    site_summary: str,
+    sections: Dict[str, List[Dict]],
+    optional: List[Dict],
+) -> str:
+    """Build an llms.txt string that follows the Jeremy Howard spec:
+
+    # Site Name
+    > Short summary
+    ## Section
+    - [Title](url): Description
+    ## Optional
+    - [Title](url): Description
+    """
+    lines = [f"# {site_name}\n"]
+
+    if site_summary:
+        lines.append(f"> {site_summary}\n")
+
+    # Sort sections: "Main" first, then alphabetical
+    section_order = sorted(sections.keys(), key=lambda s: (s != "Main", s))
+
+    for section_name in section_order:
+        items = sections[section_name]
+        lines.append(f"\n## {section_name}\n")
+        for r in items:
+            lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
+
+    if optional:
+        lines.append("\n## Optional\n")
+        for r in optional:
+            lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _format_spec_llms_full(
+    site_name: str,
+    results: List[Dict],
+) -> str:
+    """Build llms-full.txt with full markdown content per page."""
+    lines = [f"# {site_name}\n"]
+
+    for i, r in enumerate(results, 1):
+        if r.get("markdown"):
+            lines.append(f"\n---\n\n## {r['title']}\n\nSource: {r['url']}\n")
+            lines.append(r["markdown"])
+
+    content = "\n".join(lines) + "\n"
+    return content
+
+
+def _validate_llmstxt(content: str, results: List[Dict]) -> List[Dict]:
+    """Run validation checks on the generated llms.txt and return issues."""
+    issues = []
+
+    # Check file size
+    size_kb = len(content.encode("utf-8")) / 1024
+    if size_kb > 50:
+        issues.append({
+            "level": "warning",
+            "message": f"File size is {size_kb:.1f} KB — recommended to keep under 50 KB for LLM context efficiency.",
+        })
+
+    # Check for required H1
+    if not content.startswith("# "):
+        issues.append({
+            "level": "error",
+            "message": "Missing required H1 title at the top of the file.",
+        })
+
+    # Check for relative URLs
+    for r in results:
+        if r["url"].startswith("/") or not r["url"].startswith("http"):
+            issues.append({
+                "level": "error",
+                "message": f"Relative URL found: {r['url']} — all URLs must be absolute.",
+            })
+            break  # one warning is enough
+
+    # Check for blockquote summary
+    if "\n>" not in content and not content.split("\n", 2)[1].startswith(">"):
+        issues.append({
+            "level": "info",
+            "message": "No blockquote summary found. Consider adding a > summary line for better LLM context.",
+        })
+
+    # Check for sections
+    if "## " not in content:
+        issues.append({
+            "level": "info",
+            "message": "No H2 sections found. Grouping pages under sections improves LLM navigation.",
+        })
+
+    return issues
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +420,42 @@ class LLMsTextGenerator:
             )
             return short_title, short_desc
 
+    # -- Site summary generator ------------------------------------------------
+
+    def generate_site_summary(
+        self, site_url: str, page_titles: List[str]
+    ) -> Tuple[str, str]:
+        """Generate a site name and one-line summary using AI.
+
+        Returns (site_name, summary).
+        """
+        domain = urlparse(site_url).netloc.replace("www.", "")
+
+        if not self.llm_client:
+            return domain, ""
+
+        titles_sample = "\n".join(page_titles[:30])
+        prompt = (
+            f"Given this website URL and a sample of its page titles, generate:\n"
+            f"1. A short site/project name (1-3 words, like a brand name)\n"
+            f"2. A one-sentence summary (15-25 words) describing what this site/product does\n\n"
+            f"URL: {site_url}\n"
+            f"Page titles:\n{titles_sample}\n\n"
+            f'Return JSON: {{"name": "Site Name", "summary": "One sentence summary."}}'
+        )
+        try:
+            result = self._call_llm(
+                prompt,
+                "You generate concise site names and summaries for llms.txt files.",
+            )
+            return (
+                result.get("name", domain),
+                result.get("summary", ""),
+            )
+        except Exception as e:
+            logger.error(f"Error generating site summary: {e}")
+            return domain, ""
+
     # -- URL processors -----------------------------------------------------
 
     def process_url_firecrawl(self, url: str, index: int) -> Optional[Dict]:
@@ -286,6 +495,9 @@ class LLMsTextGenerator:
             "description": desc,
             "markdown": markdown,
             "index": index,
+            "crawl_depth": entry.get("crawl_depth", 0),
+            "inlinks": entry.get("inlinks", 0),
+            "unique_inlinks": entry.get("unique_inlinks", 0),
         }
 
     # -- Main generation methods --------------------------------------------
@@ -361,7 +573,14 @@ class LLMsTextGenerator:
                 time.sleep(1)
 
         all_results.sort(key=lambda x: x["index"])
-        return self._format_output(site_url, all_results, generate_full, total)
+
+        # Generate site name & summary via AI
+        page_titles = [r["title"] for r in all_results if r.get("title")]
+        site_name, site_summary = self.generate_site_summary(site_url, page_titles)
+
+        return self._format_output(
+            site_url, site_name, site_summary, all_results, generate_full, total
+        )
 
     def _build_from_metadata(
         self, site_url: str, csv_entries: List[Dict], generate_full: bool
@@ -371,13 +590,13 @@ class LLMsTextGenerator:
         for i, entry in enumerate(csv_entries):
             title = entry.get("title", "") or "Page"
             title_words = title.split()
-            if len(title_words) > 4:
-                title = " ".join(title_words[:4])
+            if len(title_words) > 6:
+                title = " ".join(title_words[:6])
 
             description = entry.get("description", "") or "No description available"
             desc_words = description.split()
-            if len(desc_words) > 12:
-                description = " ".join(desc_words[:10])
+            if len(desc_words) > 15:
+                description = " ".join(desc_words[:12])
 
             all_results.append(
                 {
@@ -386,33 +605,48 @@ class LLMsTextGenerator:
                     "description": description,
                     "markdown": "",
                     "index": i,
+                    "crawl_depth": entry.get("crawl_depth", 0),
+                    "inlinks": entry.get("inlinks", 0),
+                    "unique_inlinks": entry.get("unique_inlinks", 0),
                 }
             )
+
+        domain = urlparse(site_url).netloc.replace("www.", "")
         return self._format_output(
-            site_url, all_results, generate_full, len(csv_entries)
+            site_url, domain, "", all_results, generate_full, len(csv_entries)
         )
 
-    @staticmethod
     def _format_output(
-        site_url: str, results: List[Dict], generate_full: bool, total: int
+        self,
+        site_url: str,
+        site_name: str,
+        site_summary: str,
+        results: List[Dict],
+        generate_full: bool,
+        total: int,
     ) -> Dict[str, str]:
-        llmstxt = f"# {site_url} llms.txt\n\n"
-        llms_fulltxt = f"# {site_url} llms-full.txt\n\n"
+        """Produce spec-compliant llms.txt with sections and optional."""
+        sections, optional = _group_into_sections(results)
 
-        has_full_content = False
-        for i, r in enumerate(results, 1):
-            llmstxt += f"- [{r['title']}]({r['url']}): {r['description']}\n"
-            if generate_full and r.get("markdown"):
-                has_full_content = True
-                llms_fulltxt += (
-                    f"<|page-{i}-llmstxt|>\n## {r['title']}\n{r['markdown']}\n\n"
-                )
+        llmstxt = _format_spec_llmstxt(
+            site_url, site_name, site_summary, sections, optional
+        )
+
+        llms_fulltxt = ""
+        if generate_full:
+            llms_fulltxt = _format_spec_llms_full(site_name, results)
+            # Only keep if there's actual content
+            if not any(r.get("markdown") for r in results):
+                llms_fulltxt = ""
+
+        validation = _validate_llmstxt(llmstxt, results)
 
         return {
             "llmstxt": llmstxt,
-            "llms_fulltxt": llms_fulltxt if generate_full and has_full_content else "",
+            "llms_fulltxt": llms_fulltxt,
             "num_urls_processed": len(results),
             "num_urls_total": total,
+            "validation": validation,
         }
 
 
@@ -494,7 +728,9 @@ def main():
         st.markdown(
             "Upload a Screaming Frog **Internal All** CSV export. "
             "The tool reads `Address`, `Status Code`, `Content Type`, `Title 1`, "
-            "`Meta Description 1`, and `Indexability` columns."
+            "`Meta Description 1`, `Indexability`, plus `Crawl Depth`, `Inlinks`, "
+            "and `Unique Inlinks` for page importance ranking and automatic "
+            "`## Optional` section detection."
         )
 
         csv_url = st.text_input(
@@ -614,13 +850,42 @@ def _run_csv(url, uploaded_file, firecrawl_key, bifrost_key, max_urls, generate_
 
 
 def _display_results(result: Dict, url: str):
-    """Render the generated output and download buttons."""
+    """Render the generated output, validation, and download buttons."""
     domain = urlparse(url).netloc.replace("www.", "")
 
     st.success(
         f"Processed **{result['num_urls_processed']}** of "
         f"**{result['num_urls_total']}** URLs"
     )
+
+    # -- Validation panel --------------------------------------------------
+    validation = result.get("validation", [])
+    if validation:
+        with st.expander("Validation Results", expanded=True):
+            for issue in validation:
+                level = issue["level"]
+                msg = issue["message"]
+                if level == "error":
+                    st.error(msg)
+                elif level == "warning":
+                    st.warning(msg)
+                else:
+                    st.info(msg)
+    else:
+        st.info("All validation checks passed.")
+
+    # -- File size stats ---------------------------------------------------
+    size_kb = len(result["llmstxt"].encode("utf-8")) / 1024
+    full_size_kb = (
+        len(result["llms_fulltxt"].encode("utf-8")) / 1024
+        if result.get("llms_fulltxt")
+        else 0
+    )
+    cols = st.columns(3)
+    cols[0].metric("llms.txt size", f"{size_kb:.1f} KB")
+    if full_size_kb:
+        cols[1].metric("llms-full.txt size", f"{full_size_kb:.1f} KB")
+    cols[2].metric("Pages included", result["num_urls_processed"])
 
     # -- llms.txt ----------------------------------------------------------
     st.subheader("llms.txt")
@@ -636,7 +901,10 @@ def _display_results(result: Dict, url: str):
     if result.get("llms_fulltxt"):
         st.subheader("llms-full.txt")
         with st.expander("Preview llms-full.txt", expanded=False):
-            st.code(result["llms_fulltxt"][:5000] + ("\n..." if len(result["llms_fulltxt"]) > 5000 else ""), language="markdown")
+            preview = result["llms_fulltxt"][:5000]
+            if len(result["llms_fulltxt"]) > 5000:
+                preview += "\n..."
+            st.code(preview, language="markdown")
         st.download_button(
             label="Download llms-full.txt",
             data=result["llms_fulltxt"],
