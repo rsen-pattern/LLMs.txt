@@ -58,6 +58,81 @@ def _safe_float(val: str) -> float:
         return 0.0
 
 
+def _truncate_text(text: str, max_chars: int = 120, ellipsis: bool = True) -> str:
+    """Truncate text at a natural boundary (sentence end, comma, or dash).
+
+    Prefers cutting at the end of a sentence. Falls back to the last comma,
+    semicolon, or dash before *max_chars*. As a last resort, cuts at the last
+    word boundary and appends an ellipsis.
+    """
+    if not text or len(text) <= max_chars:
+        return text
+
+    # Try to find sentence end within limit
+    for sep in (". ", "! ", "? "):
+        idx = text.rfind(sep, 0, max_chars)
+        if idx > max_chars * 0.4:  # Only use if we keep >40% of the text
+            return text[: idx + 1].strip()
+
+    # Try clause boundary (comma, semicolon, dash)
+    for sep in (", ", "; ", " – ", " — ", " - "):
+        idx = text.rfind(sep, 0, max_chars)
+        if idx > max_chars * 0.4:
+            return text[:idx].strip()
+
+    # Fall back to word boundary
+    idx = text.rfind(" ", 0, max_chars)
+    if idx > 0:
+        suffix = "..." if ellipsis else ""
+        return text[:idx].strip() + suffix
+
+    return text[:max_chars].strip()
+
+
+def _truncate_title(title: str, max_chars: int = 60) -> str:
+    """Truncate a page title at a natural boundary.
+
+    Titles use a shorter limit and prefer breaking at ` | `, ` - `, or ` : `.
+    """
+    if not title or len(title) <= max_chars:
+        return title
+
+    # Common title separators (keep the part before the separator)
+    for sep in (" | ", " - ", " – ", " — ", " : "):
+        idx = title.find(sep)
+        if 0 < idx <= max_chars:
+            return title[:idx].strip()
+
+    return _truncate_text(title, max_chars, ellipsis=False)
+
+
+def _title_from_url(url: str) -> str:
+    """Derive a human-readable title from a URL path when metadata is missing."""
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return urlparse(url).netloc.replace("www.", "")
+    # Use the last meaningful segment
+    segment = path.rstrip("/").split("/")[-1]
+    # Remove common file extensions
+    for ext in (".html", ".htm", ".php", ".aspx"):
+        if segment.endswith(ext):
+            segment = segment[: -len(ext)]
+    # Convert slugs to title case
+    return segment.replace("-", " ").replace("_", " ").title()
+
+
+def _description_from_url(url: str) -> str:
+    """Generate a minimal description from the URL path when metadata is missing."""
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return ""
+    parts = [p.replace("-", " ").replace("_", " ").title() for p in path.split("/")]
+    if len(parts) == 1:
+        return parts[0]
+    # e.g. "Blog > Best Bags For University"
+    return " > ".join(parts[-2:])
+
+
 def parse_screaming_frog_csv(file_contents: str, max_urls: int = 0) -> List[Dict]:
     """Parse a Screaming Frog 'Internal All' CSV from an in-memory string.
 
@@ -534,7 +609,7 @@ class LLMsTextGenerator:
 
     def generate_description(self, url: str, markdown: str) -> Tuple[str, str]:
         if not self.llm_client:
-            return "Page", "No description available"
+            return _title_from_url(url), _description_from_url(url)
 
         prompt = (
             f"Generate a concise title and an action-oriented description for this web page.\n\n"
@@ -552,22 +627,23 @@ class LLMsTextGenerator:
                 prompt,
                 "You are a helpful assistant that generates concise titles and descriptions for web pages.",
             )
-            return result.get("title", "Page"), result.get(
-                "description", "No description available"
+            return (
+                result.get("title") or _title_from_url(url),
+                result.get("description") or _description_from_url(url),
             )
         except Exception as e:
             logger.error(f"Error generating description: {e}")
-            return "Page", "No description available"
+            return _title_from_url(url), _description_from_url(url)
 
     def generate_description_from_metadata(
         self, url: str, title: str, description: str
     ) -> Tuple[str, str]:
         if not self.llm_client:
-            short_title = " ".join(title.split()[:5]) if title else "Page"
+            short_title = _truncate_title(title) if title else _title_from_url(url)
             short_desc = (
-                " ".join(description.split()[:12])
+                _truncate_text(description)
                 if description
-                else "No description available"
+                else _description_from_url(url)
             )
             return short_title, short_desc
 
@@ -586,16 +662,17 @@ class LLMsTextGenerator:
                 prompt,
                 "You are a helpful assistant that generates concise titles and descriptions for web pages.",
             )
-            return result.get("title", "Page"), result.get(
-                "description", "No description available"
+            return (
+                result.get("title") or _truncate_title(title) or _title_from_url(url),
+                result.get("description") or _truncate_text(description) or _description_from_url(url),
             )
         except Exception as e:
             logger.error(f"Error generating description from metadata: {e}")
-            short_title = " ".join(title.split()[:4]) if title else "Page"
+            short_title = _truncate_title(title) if title else _title_from_url(url)
             short_desc = (
-                " ".join(description.split()[:10])
+                _truncate_text(description)
                 if description
-                else "No description available"
+                else _description_from_url(url)
             )
             return short_title, short_desc
 
@@ -876,15 +953,18 @@ class LLMsTextGenerator:
         """Build output directly from CSV metadata — no API calls."""
         all_results = []
         for i, entry in enumerate(csv_entries):
-            title = entry.get("title", "") or "Page"
-            title_words = title.split()
-            if len(title_words) > 6:
-                title = " ".join(title_words[:6])
+            url = entry["url"]
+            title = entry.get("title", "") or ""
+            if not title:
+                title = _title_from_url(url)
+            else:
+                title = _truncate_title(title)
 
-            description = entry.get("description", "") or "No description available"
-            desc_words = description.split()
-            if len(desc_words) > 15:
-                description = " ".join(desc_words[:12])
+            description = entry.get("description", "") or ""
+            if not description:
+                description = _description_from_url(url)
+            else:
+                description = _truncate_text(description)
 
             all_results.append(
                 {
@@ -1059,6 +1139,28 @@ def main():
             "Enter a URL and we'll automatically discover pages via Firecrawl, "
             "scrape their content, and generate AI summaries via Bifrost."
         )
+        with st.expander("ℹ️ How to use Firecrawl mode", expanded=False):
+            st.markdown("""
+**Requirements:** Firecrawl API key + Bifrost API key (enter in sidebar)
+
+**How it works:**
+1. Enter your website URL below and click **Generate llms.txt**
+2. Firecrawl's `/map` endpoint discovers all pages on the site
+3. Each page is scraped for its full markdown content
+4. Bifrost AI generates concise titles and action-oriented descriptions
+5. Pages are grouped into sections and output as `llms.txt` + `llms-full.txt`
+
+**Tips for best results:**
+- **Max URLs** (sidebar): Start with 20–50 for a quick test, increase to 100+ for comprehensive output
+- **Output Pattern** (sidebar): Choose *Catalog* for docs-heavy sites, *Workflow* for developer tools, *Index + Export* for tutorial-focused sites
+- The tool automatically detects the site name and generates a one-line summary
+- Pages are ranked by importance and low-value deep pages go to `## Optional`
+
+**Limitations:**
+- Some sites block automated scraping — if results are empty, try Screaming Frog CSV mode instead
+- JavaScript-heavy SPAs may return incomplete content
+- Rate limits apply based on your Firecrawl plan
+""")
         fc_url = st.text_input(
             "Website URL",
             placeholder="https://example.com",
@@ -1083,6 +1185,48 @@ def main():
             "and canonical URLs for deduplication, importance ranking, and automatic "
             "`## Optional` section detection. See the sidebar for content filters."
         )
+        with st.expander("ℹ️ How to get your Screaming Frog CSV", expanded=False):
+            st.markdown("""
+**Step 1 — Configure the Spider** (before crawling):
+- **Configuration > Spider > Crawl**: Check "Crawl Internal Links", uncheck "Crawl External Links"
+- **Configuration > Spider > Limits**: Set Crawl Depth to 5–8 (prevents endlessly deep pages)
+- **Configuration > Content > Duplicates**: Check "Enable Near Duplicates" (needed for similarity filtering)
+- **Configuration > Content > Area**: Check "Hash" (enables content hash for exact dedup)
+
+**Step 2 — Crawl the website:**
+- Enter the full URL (e.g. `https://example.com`) and click **Start**
+- Wait for the crawl to complete (progress bar shows status)
+
+**Step 3 — Export the CSV:**
+- Click the **Internal** tab at the top
+- Set the filter dropdown to **HTML** (pre-filters to HTML pages only)
+- Go to **File > Export** and save as CSV
+- Upload that CSV file below
+
+**Recommended settings by site size:**
+
+| Site Size | Max URLs | Crawl Depth |
+|-----------|----------|-------------|
+| Small (<100 pages) | Unlimited | No limit |
+| Medium (100–1,000) | 500 | 6 |
+| Large (1,000–10,000) | 1,000 | 5 |
+| Very Large (10,000+) | 2,000 | 4 |
+""")
+        with st.expander("ℹ️ Content filters & modes", expanded=False):
+            st.markdown("""
+**Three processing modes** (checkboxes below):
+
+| Mode | AI Checkbox | Scrape Checkbox | Keys Needed |
+|------|-------------|-----------------|-------------|
+| **CSV only** (fastest) | ☐ Off | ☐ Off | None |
+| **CSV + AI** (recommended) | ☑ On | ☐ Off | Bifrost |
+| **CSV + Scrape** (full content) | ☑ On | ☑ On | Bifrost + Firecrawl |
+
+**Sidebar filters** (under *Screaming Frog Filters*):
+- **Remove duplicates**: Uses canonical URLs + content hashes to remove duplicate pages (recommended)
+- **Remove near-duplicates**: Filters pages above a similarity threshold — requires "Enable Near Duplicates" in Screaming Frog config
+- **Remove thin content**: Filters pages below a minimum word count (e.g. 50 words) to skip empty/stub pages
+""")
 
         csv_url = st.text_input(
             "Website URL (used as header in output)",

@@ -91,6 +91,59 @@ def _safe_float(val: str) -> float:
         return 0.0
 
 
+def _truncate_text(text: str, max_chars: int = 120, ellipsis: bool = True) -> str:
+    """Truncate text at a natural boundary (sentence end, comma, or dash)."""
+    if not text or len(text) <= max_chars:
+        return text
+    for sep in (". ", "! ", "? "):
+        idx = text.rfind(sep, 0, max_chars)
+        if idx > max_chars * 0.4:
+            return text[: idx + 1].strip()
+    for sep in (", ", "; ", " – ", " — ", " - "):
+        idx = text.rfind(sep, 0, max_chars)
+        if idx > max_chars * 0.4:
+            return text[:idx].strip()
+    idx = text.rfind(" ", 0, max_chars)
+    if idx > 0:
+        suffix = "..." if ellipsis else ""
+        return text[:idx].strip() + suffix
+    return text[:max_chars].strip()
+
+
+def _truncate_title(title: str, max_chars: int = 60) -> str:
+    """Truncate a page title at a natural boundary."""
+    if not title or len(title) <= max_chars:
+        return title
+    for sep in (" | ", " - ", " – ", " — ", " : "):
+        idx = title.find(sep)
+        if 0 < idx <= max_chars:
+            return title[:idx].strip()
+    return _truncate_text(title, max_chars, ellipsis=False)
+
+
+def _title_from_url(url: str) -> str:
+    """Derive a human-readable title from a URL path."""
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return urlparse(url).netloc.replace("www.", "")
+    segment = path.rstrip("/").split("/")[-1]
+    for ext in (".html", ".htm", ".php", ".aspx"):
+        if segment.endswith(ext):
+            segment = segment[: -len(ext)]
+    return segment.replace("-", " ").replace("_", " ").title()
+
+
+def _description_from_url(url: str) -> str:
+    """Generate a minimal description from the URL path."""
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return ""
+    parts = [p.replace("-", " ").replace("_", " ").title() for p in path.split("/")]
+    if len(parts) == 1:
+        return parts[0]
+    return " > ".join(parts[-2:])
+
+
 def _url_to_section(url: str) -> str:
     path = urlparse(url).path.strip("/")
     if not path:
@@ -401,35 +454,44 @@ class LLMsTextGenerator:
 
     def generate_description(self, url: str, markdown: str) -> Tuple[str, str]:
         if not self.llm_client:
-            return "Page", "No description available"
+            return _title_from_url(url), _description_from_url(url)
         prompt = (
-            f"Generate a 9-10 word description and a 3-4 word title for: {url}\n\n"
-            f'Return JSON: {{"title": "3-4 word title", "description": "9-10 word description"}}\n\n'
+            f"Generate a concise title and an action-oriented description for this web page.\n\n"
+            f"URL: {url}\n\n"
+            f"Rules:\n"
+            f"- Title: 3-5 words, descriptive (not generic like 'Documentation' or 'Page')\n"
+            f"- Description: 8-12 words, action-oriented, explains what the user can learn or do\n\n"
+            f'Return JSON: {{"title": "Descriptive Title", "description": "Action-oriented description."}}\n\n'
             f"Page content:\n{markdown[:4000]}"
         )
         try:
             r = self._call_llm(prompt, "You generate concise titles and descriptions for web pages.")
-            return r.get("title", "Page"), r.get("description", "No description available")
+            return (r.get("title") or _title_from_url(url),
+                    r.get("description") or _description_from_url(url))
         except Exception as e:
             logger.error(f"Error generating description: {e}")
-            return "Page", "No description available"
+            return _title_from_url(url), _description_from_url(url)
 
     def generate_description_from_metadata(self, url: str, title: str, desc: str) -> Tuple[str, str]:
         if not self.llm_client:
-            return (" ".join(title.split()[:4]) if title else "Page",
-                     " ".join(desc.split()[:10]) if desc else "No description available")
+            return (_truncate_title(title) if title else _title_from_url(url),
+                    _truncate_text(desc) if desc else _description_from_url(url))
         prompt = (
-            f"Generate a 3-4 word title and 9-10 word description.\n"
-            f"URL: {url}\nTitle: {title}\nDescription: {desc}\n\n"
-            f'Return JSON: {{"title": "...", "description": "..."}}'
+            f"Rewrite this page's title and description to be concise and action-oriented.\n\n"
+            f"URL: {url}\nExisting Title: {title}\nExisting Description: {desc}\n\n"
+            f"Rules:\n"
+            f"- Title: 3-5 words, descriptive (not generic)\n"
+            f"- Description: 8-12 words, action-oriented, explains what the user can learn or do\n\n"
+            f'Return JSON: {{"title": "Descriptive Title", "description": "Action-oriented description."}}'
         )
         try:
             r = self._call_llm(prompt, "You generate concise titles and descriptions for web pages.")
-            return r.get("title", "Page"), r.get("description", "No description available")
+            return (r.get("title") or _truncate_title(title) or _title_from_url(url),
+                    r.get("description") or _truncate_text(desc) or _description_from_url(url))
         except Exception as e:
             logger.error(f"Error: {e}")
-            return (" ".join(title.split()[:4]) if title else "Page",
-                     " ".join(desc.split()[:10]) if desc else "No description available")
+            return (_truncate_title(title) if title else _title_from_url(url),
+                    _truncate_text(desc) if desc else _description_from_url(url))
 
     def generate_site_summary(self, site_url: str, page_titles: List[str]) -> Tuple[str, str]:
         domain = urlparse(site_url).netloc.replace("www.", "")
@@ -505,12 +567,12 @@ class LLMsTextGenerator:
         # Process: no-AI CSV shortcut
         if is_csv and not use_ai and not scrape:
             for i, entry in enumerate(items):
-                title = entry.get("title", "") or "Page"
-                if len(title.split()) > 6:
-                    title = " ".join(title.split()[:6])
-                desc = entry.get("description", "") or "No description available"
-                if len(desc.split()) > 15:
-                    desc = " ".join(desc.split()[:12])
+                url = entry["url"]
+                title = entry.get("title", "") or ""
+                title = _truncate_title(title) if title else _title_from_url(url)
+
+                desc = entry.get("description", "") or ""
+                desc = _truncate_text(desc) if desc else _description_from_url(url)
                 all_results.append({
                     "url": entry["url"], "title": title, "description": desc,
                     "markdown": "", "index": i,
