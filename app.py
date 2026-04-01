@@ -5,21 +5,33 @@ Generate llms.txt and llms-full.txt files for any website using:
 - Firecrawl API for automatic URL discovery and scraping
 - Screaming Frog "Internal All" CSV import for URL discovery
 - Patterns Bifrost API (OpenAI-compatible) for AI-generated summaries
+- Supabase for persistent configuration and crawl history
 """
 
 import csv
+import hashlib
 import io
 import json
 import logging
+import math
 import os
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
 import streamlit as st
 from openai import OpenAI
+
+try:
+    from supabase import create_client, Client as SupabaseClient
+    HAS_SUPABASE = True
+except ImportError:
+    HAS_SUPABASE = False
+    SupabaseClient = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1019,7 +1031,121 @@ class LLMsTextGenerator:
             "num_urls_processed": len(results),
             "num_urls_total": total,
             "validation": validation,
+            "results": results,
+            "sections": sections,
+            "optional": optional,
+            "site_name": site_name,
+            "site_summary": site_summary,
+            "pattern": pattern,
         }
+
+
+# ---------------------------------------------------------------------------
+# Token / stats estimation
+# ---------------------------------------------------------------------------
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for English text."""
+    return max(1, len(text) // 4)
+
+
+# ---------------------------------------------------------------------------
+# Supabase persistence
+# ---------------------------------------------------------------------------
+
+def _get_supabase_client() -> Optional["SupabaseClient"]:
+    """Create a Supabase client from secrets/env vars, or return None."""
+    if not HAS_SUPABASE:
+        return None
+    url = (
+        st.secrets.get("SUPABASE_URL", "")
+        or os.getenv("SUPABASE_URL", "")
+    )
+    key = (
+        st.secrets.get("SUPABASE_KEY", "")
+        or os.getenv("SUPABASE_KEY", "")
+    )
+    if url and key:
+        try:
+            return create_client(url, key)
+        except Exception as e:
+            logger.warning(f"Supabase connection failed: {e}")
+    return None
+
+
+def _save_crawl_config(
+    supabase: "SupabaseClient",
+    domain: str,
+    config: Dict,
+) -> None:
+    """Upsert crawl config for a domain into Supabase."""
+    try:
+        record = {
+            "domain": domain,
+            "config": json.dumps(config),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        supabase.table("llmstxt_configs").upsert(
+            record, on_conflict="domain"
+        ).execute()
+    except Exception as e:
+        logger.warning(f"Failed to save config: {e}")
+
+
+def _load_crawl_config(
+    supabase: "SupabaseClient",
+    domain: str,
+) -> Optional[Dict]:
+    """Load previously saved crawl config for a domain."""
+    try:
+        resp = (
+            supabase.table("llmstxt_configs")
+            .select("config")
+            .eq("domain", domain)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            return json.loads(resp.data[0]["config"])
+    except Exception as e:
+        logger.warning(f"Failed to load config: {e}")
+    return None
+
+
+def _list_saved_domains(supabase: "SupabaseClient") -> List[str]:
+    """List all domains with saved configs."""
+    try:
+        resp = (
+            supabase.table("llmstxt_configs")
+            .select("domain,updated_at")
+            .order("updated_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        return [r["domain"] for r in resp.data] if resp.data else []
+    except Exception as e:
+        logger.warning(f"Failed to list domains: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Rebuild llms.txt from modified results
+# ---------------------------------------------------------------------------
+
+def _rebuild_llmstxt(
+    site_url: str,
+    site_name: str,
+    site_summary: str,
+    results: List[Dict],
+    pattern: str,
+    excluded_urls: set,
+) -> str:
+    """Regenerate llms.txt after user edits (exclusions, title/summary changes)."""
+    filtered = [r for r in results if r["url"] not in excluded_urls]
+    sections, optional = _group_into_sections_by_url(filtered)
+    return _format_spec_llmstxt(
+        site_url, site_name, site_summary, sections, optional, pattern
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1036,6 +1162,9 @@ def main():
         "Firecrawl API or a Screaming Frog CSV export, powered by "
         "[Patterns Bifrost](https://docs.getbifrost.ai/) for AI summaries."
     )
+
+    # ---- Supabase client (optional) ----------------------------------------
+    supabase = _get_supabase_client()
 
     # ---- Sidebar: API keys & settings ------------------------------------
     with st.sidebar:
@@ -1089,6 +1218,32 @@ def main():
             step=5,
         )
         generate_full = st.checkbox("Generate llms-full.txt", value=True)
+        single_file_mode = st.checkbox(
+            "Combined single file",
+            value=False,
+            help="Merge ToC and full content into one file instead of separate llms.txt + llms-full.txt",
+        )
+
+        if supabase:
+            st.divider()
+            st.header("Saved Configs")
+            st.caption("Powered by Supabase — saves per-domain settings")
+            saved_domains = _list_saved_domains(supabase)
+            if saved_domains:
+                selected_domain = st.selectbox(
+                    "Load saved config",
+                    options=["(none)"] + saved_domains,
+                    key="saved_domain_select",
+                )
+                if selected_domain != "(none)":
+                    saved_cfg = _load_crawl_config(supabase, selected_domain)
+                    if saved_cfg:
+                        st.caption(f"Last saved: {saved_cfg.get('updated_at', 'unknown')}")
+                        if st.button("Apply saved config", key="apply_saved"):
+                            st.session_state["loaded_config"] = saved_cfg
+                            st.rerun()
+            else:
+                st.caption("No saved configs yet. Generate a site to save settings.")
 
         st.divider()
         st.header("Screaming Frog Filters")
@@ -1175,7 +1330,7 @@ def main():
             elif not bifrost_key:
                 st.error("Bifrost API key is required for AI summaries.")
             else:
-                _run_firecrawl(fc_url, firecrawl_key, bifrost_key, max_urls, generate_full, pattern)
+                _run_firecrawl(fc_url, firecrawl_key, bifrost_key, max_urls, generate_full, pattern, single_file_mode, supabase)
 
     # -- CSV tab -----------------------------------------------------------
     with tab_csv:
@@ -1278,6 +1433,8 @@ def main():
                     near_dupe_threshold=float(near_dupe_threshold),
                     thin_content_enabled=thin_content_enabled,
                     min_word_count=min_word_count,
+                    single_file_mode=single_file_mode,
+                    supabase=supabase,
                 )
 
 
@@ -1286,7 +1443,8 @@ def main():
 # ---------------------------------------------------------------------------
 
 
-def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full, pattern=PATTERN_CATALOG):
+def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full,
+                    pattern=PATTERN_CATALOG, single_file_mode=False, supabase=None):
     """Execute Firecrawl-based generation and display results."""
     generator = LLMsTextGenerator(
         firecrawl_api_key=firecrawl_key,
@@ -1305,7 +1463,7 @@ def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full, pat
             url, max_urls, generate_full, pattern=pattern, progress_callback=on_progress
         )
         progress_bar.progress(1.0, text="Done!")
-        _display_results(result, url)
+        _display_results(result, url, single_file_mode, supabase)
     except Exception as e:
         st.error(f"Generation failed: {e}")
 
@@ -1315,6 +1473,7 @@ def _run_csv(
     use_ai, scrape, pattern=PATTERN_CATALOG, dedup_enabled=True,
     near_dupes_enabled=False, near_dupe_threshold=90.0,
     thin_content_enabled=False, min_word_count=50,
+    single_file_mode=False, supabase=None,
 ):
     """Execute CSV-based generation with filtering and display results."""
     generator = LLMsTextGenerator(
@@ -1388,19 +1547,45 @@ def _run_csv(
             progress_callback=on_progress if (use_ai or scrape) else None,
         )
         progress_bar.progress(1.0, text="Done!")
-        _display_results(result, url)
+        _display_results(result, url, single_file_mode, supabase)
     except Exception as e:
         st.error(f"Generation failed: {e}")
 
 
-def _display_results(result: Dict, url: str):
-    """Render the generated output, validation, and download buttons."""
+def _display_results(result: Dict, url: str, single_file_mode: bool = False, supabase=None):
+    """Render the generated output with interactive editing, stats, and download."""
     domain = urlparse(url).netloc.replace("www.", "")
 
     st.success(
         f"Processed **{result['num_urls_processed']}** of "
         f"**{result['num_urls_total']}** URLs"
     )
+
+    # -- Extract raw data for interactive features -------------------------
+    all_results = result.get("results", [])
+    site_name = result.get("site_name", domain)
+    site_summary = result.get("site_summary", "")
+    pattern = result.get("pattern", PATTERN_CATALOG)
+
+    # -- Content Stats Panel -----------------------------------------------
+    llmstxt_text = result["llmstxt"]
+    fulltxt_text = result.get("llms_fulltxt", "")
+
+    size_kb = len(llmstxt_text.encode("utf-8")) / 1024
+    full_size_kb = len(fulltxt_text.encode("utf-8")) / 1024 if fulltxt_text else 0
+    toc_tokens = _estimate_tokens(llmstxt_text)
+    full_tokens = _estimate_tokens(fulltxt_text) if fulltxt_text else 0
+    total_words = sum(r.get("word_count", 0) for r in all_results)
+
+    stat_cols = st.columns(5)
+    stat_cols[0].metric("Pages", result["num_urls_processed"])
+    stat_cols[1].metric("llms.txt", f"{size_kb:.1f} KB")
+    stat_cols[2].metric("Est. Tokens (ToC)", f"{toc_tokens:,}")
+    if full_size_kb:
+        stat_cols[3].metric("llms-full.txt", f"{full_size_kb:.1f} KB")
+        stat_cols[4].metric("Est. Tokens (Full)", f"{full_tokens:,}")
+    elif total_words:
+        stat_cols[3].metric("Total Words", f"{total_words:,}")
 
     # -- Validation panel --------------------------------------------------
     validation = result.get("validation", [])
@@ -1418,43 +1603,161 @@ def _display_results(result: Dict, url: str):
     else:
         st.info("All validation checks passed.")
 
-    # -- File size stats ---------------------------------------------------
-    size_kb = len(result["llmstxt"].encode("utf-8")) / 1024
-    full_size_kb = (
-        len(result["llms_fulltxt"].encode("utf-8")) / 1024
-        if result.get("llms_fulltxt")
-        else 0
-    )
-    cols = st.columns(3)
-    cols[0].metric("llms.txt size", f"{size_kb:.1f} KB")
-    if full_size_kb:
-        cols[1].metric("llms-full.txt size", f"{full_size_kb:.1f} KB")
-    cols[2].metric("Pages included", result["num_urls_processed"])
-
-    # -- llms.txt ----------------------------------------------------------
-    st.subheader("llms.txt")
-    st.code(result["llmstxt"], language="markdown")
-    st.download_button(
-        label="Download llms.txt",
-        data=result["llmstxt"],
-        file_name=f"{domain}-llms.txt",
-        mime="text/plain",
-    )
-
-    # -- llms-full.txt -----------------------------------------------------
-    if result.get("llms_fulltxt"):
-        st.subheader("llms-full.txt")
-        with st.expander("Preview llms-full.txt", expanded=False):
-            preview = result["llms_fulltxt"][:5000]
-            if len(result["llms_fulltxt"]) > 5000:
-                preview += "\n..."
-            st.code(preview, language="markdown")
-        st.download_button(
-            label="Download llms-full.txt",
-            data=result["llms_fulltxt"],
-            file_name=f"{domain}-llms-full.txt",
-            mime="text/plain",
+    # -- Editable Site Title & Summary -------------------------------------
+    st.subheader("Site Identity")
+    st.caption("Edit the site name and summary before downloading.")
+    edit_col1, edit_col2 = st.columns([1, 3])
+    with edit_col1:
+        edited_name = st.text_input("Site Name", value=site_name, key="edit_site_name")
+    with edit_col2:
+        edited_summary = st.text_input(
+            "Site Summary", value=site_summary,
+            key="edit_site_summary",
+            placeholder="A one-sentence description of what this site offers.",
         )
+
+    # -- Per-Page Include/Exclude ------------------------------------------
+    if all_results:
+        with st.expander(f"Page Selection ({len(all_results)} pages)", expanded=False):
+            st.caption("Uncheck pages to exclude them from the output. Click **Regenerate** to apply.")
+
+            # Initialize exclusion set in session state
+            if "excluded_urls" not in st.session_state:
+                st.session_state["excluded_urls"] = set()
+
+            select_cols = st.columns([1, 1, 4])
+            with select_cols[0]:
+                if st.button("Select All", key="select_all"):
+                    st.session_state["excluded_urls"] = set()
+                    st.rerun()
+            with select_cols[1]:
+                if st.button("Deselect All", key="deselect_all"):
+                    st.session_state["excluded_urls"] = {r["url"] for r in all_results}
+                    st.rerun()
+
+            for i, r in enumerate(all_results):
+                page_url = r["url"]
+                checked = page_url not in st.session_state["excluded_urls"]
+                label = f"**{r.get('title', 'Page')}** — `{page_url}`"
+                if not st.checkbox(label, value=checked, key=f"page_incl_{i}"):
+                    st.session_state["excluded_urls"].add(page_url)
+                else:
+                    st.session_state["excluded_urls"].discard(page_url)
+
+    # -- Section Reordering ------------------------------------------------
+    sections = result.get("sections", {})
+    optional = result.get("optional", [])
+    if sections:
+        with st.expander("Section Order", expanded=False):
+            st.caption(
+                "Reorder sections by assigning position numbers. "
+                "Lower numbers appear first."
+            )
+            section_names = [s for s in sections if s != "Optional"]
+            reordered = {}
+            for idx, name in enumerate(section_names):
+                page_count = len(sections[name].get("pages", []))
+                col_a, col_b = st.columns([1, 4])
+                with col_a:
+                    pos = st.number_input(
+                        "Pos", value=idx + 1, min_value=1,
+                        max_value=len(section_names) + 1,
+                        key=f"sec_order_{idx}", label_visibility="collapsed",
+                    )
+                with col_b:
+                    st.markdown(f"**{name}** ({page_count} pages)")
+                reordered[name] = pos
+            # Store reorder for regeneration
+            st.session_state["section_order"] = reordered
+
+    # -- Regenerate button -------------------------------------------------
+    needs_regen = (
+        edited_name != site_name
+        or edited_summary != site_summary
+        or st.session_state.get("excluded_urls")
+    )
+
+    if st.button(
+        "Regenerate llms.txt" if needs_regen else "Regenerate llms.txt (no changes)",
+        key="regenerate_btn",
+        type="primary" if needs_regen else "secondary",
+    ):
+        excluded = st.session_state.get("excluded_urls", set())
+        llmstxt_text = _rebuild_llmstxt(
+            url, edited_name, edited_summary, all_results, pattern, excluded
+        )
+        # Update the result dict for display below
+        result["llmstxt"] = llmstxt_text
+
+    # -- Combined single-file mode ----------------------------------------
+    if single_file_mode and fulltxt_text:
+        combined = result["llmstxt"] + "\n\n---\n\n" + fulltxt_text
+        st.subheader("Combined llms.txt (single file)")
+
+        render_mode = st.toggle("Render Markdown", value=False, key="render_combined")
+        if render_mode:
+            st.markdown(combined)
+        else:
+            st.code(combined, language="markdown")
+
+        st.download_button(
+            label="Download combined llms.txt",
+            data=combined,
+            file_name=f"{domain}-llms.txt",
+            mime="text/plain",
+            key="dl_combined",
+        )
+    else:
+        # -- llms.txt (with preview toggle) --------------------------------
+        st.subheader("llms.txt")
+        render_toc = st.toggle("Render Markdown", value=False, key="render_toc")
+        if render_toc:
+            st.markdown(result["llmstxt"])
+        else:
+            st.code(result["llmstxt"], language="markdown")
+        st.download_button(
+            label="Download llms.txt",
+            data=result["llmstxt"],
+            file_name=f"{domain}-llms.txt",
+            mime="text/plain",
+            key="dl_llmstxt",
+        )
+
+        # -- llms-full.txt -------------------------------------------------
+        if result.get("llms_fulltxt"):
+            st.subheader("llms-full.txt")
+            with st.expander("Preview llms-full.txt", expanded=False):
+                preview = result["llms_fulltxt"][:5000]
+                if len(result["llms_fulltxt"]) > 5000:
+                    preview += "\n..."
+                render_full = st.toggle("Render Markdown", value=False, key="render_full")
+                if render_full:
+                    st.markdown(preview)
+                else:
+                    st.code(preview, language="markdown")
+            st.download_button(
+                label="Download llms-full.txt",
+                data=result["llms_fulltxt"],
+                file_name=f"{domain}-llms-full.txt",
+                mime="text/plain",
+                key="dl_fulltxt",
+            )
+
+    # -- Save config to Supabase -------------------------------------------
+    if supabase:
+        st.divider()
+        if st.button("Save config to Supabase", key="save_config"):
+            config = {
+                "site_name": edited_name,
+                "site_summary": edited_summary,
+                "pattern": pattern,
+                "excluded_urls": list(st.session_state.get("excluded_urls", [])),
+                "section_order": st.session_state.get("section_order", {}),
+                "updated_at": datetime.utcnow().isoformat(),
+                "num_pages": result["num_urls_processed"],
+            }
+            _save_crawl_config(supabase, domain, config)
+            st.success(f"Config saved for **{domain}**")
 
 
 if __name__ == "__main__":
