@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # Bifrost / LLM client helpers
 # ---------------------------------------------------------------------------
 
-BIFROST_BASE_URL = "https://bifrost.pattern.com"
+BIFROST_BASE_URL = "https://bifrost.pattern.com/v1"
 BIFROST_MODEL = "openai/gpt-4o-mini"
 
 
@@ -517,7 +517,7 @@ def _format_spec_llmstxt(
             lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
 
     # Maintenance note
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     lines.append(f"\n---\n*Generated {today}. Recommend reviewing quarterly or after major site changes.*\n")
 
     return "\n".join(lines) + "\n"
@@ -1271,7 +1271,11 @@ def _rebuild_llmstxt(
 ) -> str:
     """Regenerate llms.txt after user edits (exclusions, title/summary changes)."""
     filtered = [r for r in results if r["url"] not in excluded_urls]
-    sections, optional = _group_into_sections_by_url(filtered)
+    url_sections, optional = _group_into_sections_by_url(filtered)
+    sections = {
+        name: {"description": "", "pages": pages}
+        for name, pages in url_sections.items()
+    }
     return _format_spec_llmstxt(
         site_url, site_name, site_summary, sections, optional, pattern
     )
