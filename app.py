@@ -1569,6 +1569,16 @@ def main():
                     supabase=supabase,
                 )
 
+    # ---- Display results from session state (persists across reruns) ------
+    if "generation_result" in st.session_state:
+        result = st.session_state["generation_result"]
+        _display_results(
+            result,
+            result.get("_url", ""),
+            result.get("_single_file_mode", single_file_mode),
+            supabase,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Runner functions
@@ -1577,7 +1587,7 @@ def main():
 
 def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full,
                     pattern=PATTERN_CATALOG, single_file_mode=False, supabase=None):
-    """Execute Firecrawl-based generation and display results."""
+    """Execute Firecrawl-based generation and store results in session state."""
     generator = LLMsTextGenerator(
         firecrawl_api_key=firecrawl_key,
         bifrost_api_key=bifrost_key,
@@ -1595,7 +1605,11 @@ def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full,
             url, max_urls, generate_full, pattern=pattern, progress_callback=on_progress
         )
         progress_bar.progress(1.0, text="Done!")
-        _display_results(result, url, single_file_mode, supabase)
+        # Persist to session state so results survive reruns
+        result["_url"] = url
+        result["_single_file_mode"] = single_file_mode
+        st.session_state["generation_result"] = result
+        st.session_state["excluded_urls"] = set()
     except Exception as e:
         st.error(f"Generation failed: {e}")
 
@@ -1679,7 +1693,11 @@ def _run_csv(
             progress_callback=on_progress if (use_ai or scrape) else None,
         )
         progress_bar.progress(1.0, text="Done!")
-        _display_results(result, url, single_file_mode, supabase)
+        # Persist to session state so results survive reruns
+        result["_url"] = url
+        result["_single_file_mode"] = single_file_mode
+        st.session_state["generation_result"] = result
+        st.session_state["excluded_urls"] = set()
     except Exception as e:
         st.error(f"Generation failed: {e}")
 
@@ -1815,11 +1833,15 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
         type="primary" if needs_regen else "secondary",
     ):
         excluded = st.session_state.get("excluded_urls", set())
-        llmstxt_text = _rebuild_llmstxt(
+        new_llmstxt = _rebuild_llmstxt(
             url, edited_name, edited_summary, all_results, pattern, excluded
         )
-        # Update the result dict for display below
-        result["llmstxt"] = llmstxt_text
+        # Update session state so the change persists across reruns
+        result["llmstxt"] = new_llmstxt
+        result["site_name"] = edited_name
+        result["site_summary"] = edited_summary
+        st.session_state["generation_result"] = result
+        st.rerun()
 
     # -- Combined single-file mode ----------------------------------------
     if single_file_mode and fulltxt_text:
