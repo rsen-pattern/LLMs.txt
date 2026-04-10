@@ -1345,7 +1345,7 @@ def main():
         max_urls = st.number_input(
             "Max URLs to process",
             min_value=1,
-            max_value=500,
+            max_value=1500,
             value=20,
             step=5,
         )
@@ -1585,9 +1585,24 @@ def main():
 # ---------------------------------------------------------------------------
 
 
+def _clear_display_widget_keys():
+    """Remove stale widget keys from session state before a new generation."""
+    keys_to_clear = [
+        "edit_site_name", "edit_site_summary", "excluded_urls",
+        "section_order", "render_combined", "render_toc", "render_full",
+    ]
+    for k in keys_to_clear:
+        st.session_state.pop(k, None)
+    # Clear dynamic per-page and per-section keys
+    for k in list(st.session_state.keys()):
+        if k.startswith("page_incl_") or k.startswith("sec_order_"):
+            del st.session_state[k]
+
+
 def _run_firecrawl(url, firecrawl_key, bifrost_key, max_urls, generate_full,
                     pattern=PATTERN_CATALOG, single_file_mode=False, supabase=None):
     """Execute Firecrawl-based generation and store results in session state."""
+    _clear_display_widget_keys()
     generator = LLMsTextGenerator(
         firecrawl_api_key=firecrawl_key,
         bifrost_api_key=bifrost_key,
@@ -1622,6 +1637,7 @@ def _run_csv(
     single_file_mode=False, supabase=None,
 ):
     """Execute CSV-based generation with filtering and display results."""
+    _clear_display_widget_keys()
     generator = LLMsTextGenerator(
         firecrawl_api_key=firecrawl_key if scrape else None,
         bifrost_api_key=bifrost_key if use_ai else None,
@@ -1754,14 +1770,21 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
         st.info("All validation checks passed.")
 
     # -- Editable Site Title & Summary -------------------------------------
+    # Initialize widget defaults in session state FIRST, then use key= only
+    # (passing both value= and key= causes Streamlit crashes on rerun)
+    if "edit_site_name" not in st.session_state:
+        st.session_state["edit_site_name"] = site_name
+    if "edit_site_summary" not in st.session_state:
+        st.session_state["edit_site_summary"] = site_summary
+
     st.subheader("Site Identity")
     st.caption("Edit the site name and summary before downloading.")
     edit_col1, edit_col2 = st.columns([1, 3])
     with edit_col1:
-        edited_name = st.text_input("Site Name", value=site_name, key="edit_site_name")
+        edited_name = st.text_input("Site Name", key="edit_site_name")
     with edit_col2:
         edited_summary = st.text_input(
-            "Site Summary", value=site_summary,
+            "Site Summary",
             key="edit_site_summary",
             placeholder="A one-sentence description of what this site offers.",
         )
@@ -1788,8 +1811,11 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
             for i, r in enumerate(all_results):
                 page_url = r["url"]
                 checked = page_url not in st.session_state["excluded_urls"]
+                cb_key = f"page_incl_{i}"
+                if cb_key not in st.session_state:
+                    st.session_state[cb_key] = checked
                 label = f"**{r.get('title', 'Page')}** — `{page_url}`"
-                if not st.checkbox(label, value=checked, key=f"page_incl_{i}"):
+                if not st.checkbox(label, key=cb_key):
                     st.session_state["excluded_urls"].add(page_url)
                 else:
                     st.session_state["excluded_urls"].discard(page_url)
@@ -1807,12 +1833,15 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
             reordered = {}
             for idx, name in enumerate(section_names):
                 page_count = len(sections[name].get("pages", []))
+                order_key = f"sec_order_{idx}"
+                if order_key not in st.session_state:
+                    st.session_state[order_key] = idx + 1
                 col_a, col_b = st.columns([1, 4])
                 with col_a:
                     pos = st.number_input(
-                        "Pos", value=idx + 1, min_value=1,
+                        "Pos", min_value=1,
                         max_value=len(section_names) + 1,
-                        key=f"sec_order_{idx}", label_visibility="collapsed",
+                        key=order_key, label_visibility="collapsed",
                     )
                 with col_b:
                     st.markdown(f"**{name}** ({page_count} pages)")
@@ -1848,7 +1877,9 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
         combined = result["llmstxt"] + "\n\n---\n\n" + fulltxt_text
         st.subheader("Combined llms.txt (single file)")
 
-        render_mode = st.toggle("Render Markdown", value=False, key="render_combined")
+        if "render_combined" not in st.session_state:
+            st.session_state["render_combined"] = False
+        render_mode = st.toggle("Render Markdown", key="render_combined")
         if render_mode:
             st.markdown(combined)
         else:
@@ -1864,7 +1895,9 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
     else:
         # -- llms.txt (with preview toggle) --------------------------------
         st.subheader("llms.txt")
-        render_toc = st.toggle("Render Markdown", value=False, key="render_toc")
+        if "render_toc" not in st.session_state:
+            st.session_state["render_toc"] = False
+        render_toc = st.toggle("Render Markdown", key="render_toc")
         if render_toc:
             st.markdown(result["llmstxt"])
         else:
@@ -1884,7 +1917,9 @@ def _display_results(result: Dict, url: str, single_file_mode: bool = False, sup
                 preview = result["llms_fulltxt"][:5000]
                 if len(result["llms_fulltxt"]) > 5000:
                     preview += "\n..."
-                render_full = st.toggle("Render Markdown", value=False, key="render_full")
+                if "render_full" not in st.session_state:
+                    st.session_state["render_full"] = False
+                render_full = st.toggle("Render Markdown", key="render_full")
                 if render_full:
                     st.markdown(preview)
                 else:
