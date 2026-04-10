@@ -329,23 +329,36 @@ OPTIONAL_INLINKS_THRESHOLD = 1
 # Pages with link score <= this are candidates for Optional (0-100 scale, like PageRank)
 OPTIONAL_LINK_SCORE_THRESHOLD = 5
 
-# Output pattern types
+# Output pattern types — named by common site type
 PATTERN_CATALOG = "catalog"
 PATTERN_WORKFLOW = "workflow"
 PATTERN_INDEX_EXPORT = "index_export"
+PATTERN_ECOMMERCE = "ecommerce"
 
 # Semantic section templates per pattern
 CATALOG_SECTIONS = [
     "Getting Started", "Core Concepts", "Guides", "API Reference",
-    "Integrations", "Resources", "Optional",
+    "Integrations", "Resources", "Contact", "Optional",
 ]
 WORKFLOW_SECTIONS = [
     "Quickstart", "Setup & Configuration", "Features", "Workflows",
-    "Troubleshooting", "Reference", "Optional",
+    "Troubleshooting", "Reference", "Contact", "Optional",
 ]
 INDEX_EXPORT_SECTIONS = [
-    "Overview", "Documentation", "Tutorials", "API", "Examples", "Optional",
+    "Overview", "Documentation", "Tutorials", "API", "Examples", "Contact", "Optional",
 ]
+ECOMMERCE_SECTIONS = [
+    "Brand Overview", "Product Categories", "Brand Portfolio", "Shopping Help",
+    "Customer Service", "Store Locator", "Important Pages", "Contact", "Optional",
+]
+
+# Section display names for the UI
+PATTERN_LABELS = {
+    PATTERN_CATALOG: "SaaS / API Platform (Stripe, Cloudflare)",
+    PATTERN_WORKFLOW: "Developer Tool / IDE (Cursor, Windsurf)",
+    PATTERN_INDEX_EXPORT: "Documentation / AI-Native (Anthropic, LangGraph)",
+    PATTERN_ECOMMERCE: "E-Commerce / Retail (Strandbags, Nike)",
+}
 
 
 def _url_to_section(url: str) -> str:
@@ -393,16 +406,33 @@ def _is_optional_page(r: Dict) -> bool:
     return is_deep and is_low_importance
 
 
+_CONTACT_URL_KEYWORDS = {
+    "contact", "customer-service", "customer-support", "store-locator",
+    "find-a-store", "locations", "help-centre", "help-center", "support",
+}
+
+
+def _is_contact_page(r: Dict) -> bool:
+    """Detect contact/support/store-locator pages from URL or title."""
+    url_lower = r["url"].lower()
+    title_lower = r.get("title", "").lower()
+    return any(kw in url_lower for kw in _CONTACT_URL_KEYWORDS) or any(
+        kw in title_lower for kw in ("contact", "store locator", "customer service")
+    )
+
+
 def _group_into_sections_by_url(
     results: List[Dict],
 ) -> Tuple[Dict[str, List[Dict]], List[Dict]]:
-    """Fallback: group by URL path segments."""
+    """Fallback: group by URL path segments. Detects Contact pages automatically."""
     sections: Dict[str, List[Dict]] = {}
     optional: List[Dict] = []
 
     for r in results:
         if _is_optional_page(r):
             optional.append(r)
+        elif _is_contact_page(r):
+            sections.setdefault("Contact", []).append(r)
         else:
             section = _url_to_section(r["url"])
             sections.setdefault(section, []).append(r)
@@ -413,6 +443,17 @@ def _group_into_sections_by_url(
     optional.sort(key=_page_importance_score, reverse=True)
 
     return sections, optional
+
+
+def _get_template_order(pattern: str) -> List[str]:
+    """Return the section ordering template for the given pattern."""
+    if pattern == PATTERN_WORKFLOW:
+        return WORKFLOW_SECTIONS
+    elif pattern == PATTERN_INDEX_EXPORT:
+        return INDEX_EXPORT_SECTIONS
+    elif pattern == PATTERN_ECOMMERCE:
+        return ECOMMERCE_SECTIONS
+    return CATALOG_SECTIONS
 
 
 def _format_spec_llmstxt(
@@ -429,23 +470,29 @@ def _format_spec_llmstxt(
     """
     lines = [f"# {site_name}\n"]
 
+    # Blockquote summary — always include (required by spec)
     if site_summary:
         lines.append(f"> {site_summary}\n")
+    else:
+        domain = urlparse(site_url).netloc.replace("www.", "")
+        lines.append(f"> Official website content for {domain}.\n")
+
+    # llms-full.txt companion reference
+    domain = urlparse(site_url).netloc.replace("www.", "")
+    lines.append(f"For full page content, see [{domain}/llms-full.txt]({site_url.rstrip('/')}/llms-full.txt)\n")
 
     # Determine section ordering based on pattern template
-    if pattern == PATTERN_WORKFLOW:
-        template_order = WORKFLOW_SECTIONS
-    elif pattern == PATTERN_INDEX_EXPORT:
-        template_order = INDEX_EXPORT_SECTIONS
-    else:
-        template_order = CATALOG_SECTIONS
+    template_order = _get_template_order(pattern)
 
     # Order: template sections first (in template order), then remaining alphabetically
-    template_names = [s for s in template_order if s in sections and s != "Optional"]
+    template_names = [s for s in template_order if s in sections and s not in ("Optional", "Contact")]
     remaining = sorted(
-        [s for s in sections if s not in template_order and s != "Optional"]
+        [s for s in sections if s not in template_order and s not in ("Optional", "Contact")]
     )
+    # Contact goes right before Optional
     section_order = template_names + remaining
+    if "Contact" in sections:
+        section_order.append("Contact")
 
     for section_name in section_order:
         section_data = sections[section_name]
@@ -468,6 +515,10 @@ def _format_spec_llmstxt(
         lines.append("\n## Optional\n")
         for r in optional:
             lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
+
+    # Maintenance note
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    lines.append(f"\n---\n*Generated {today}. Recommend reviewing quarterly or after major site changes.*\n")
 
     return "\n".join(lines) + "\n"
 
@@ -492,6 +543,8 @@ def _validate_llmstxt(content: str, results: List[Dict]) -> List[Dict]:
     """Run validation checks on the generated llms.txt and return issues."""
     issues = []
 
+    # -- Structural checks -------------------------------------------------
+
     # Check file size
     size_kb = len(content.encode("utf-8")) / 1024
     if size_kb > 50:
@@ -507,6 +560,24 @@ def _validate_llmstxt(content: str, results: List[Dict]) -> List[Dict]:
             "message": "Missing required H1 title at the top of the file.",
         })
 
+    # Check for blockquote summary (required by spec)
+    lines = content.split("\n")
+    has_blockquote = any(line.startswith(">") for line in lines[:5])
+    if not has_blockquote:
+        issues.append({
+            "level": "error",
+            "message": "Missing blockquote summary (> ...) after H1 title — required by the llms.txt spec.",
+        })
+
+    # Check for sections
+    if "## " not in content:
+        issues.append({
+            "level": "info",
+            "message": "No H2 sections found. Grouping pages under sections improves LLM navigation.",
+        })
+
+    # -- URL checks --------------------------------------------------------
+
     # Check for relative URLs
     for r in results:
         if r["url"].startswith("/") or not r["url"].startswith("http"):
@@ -516,18 +587,69 @@ def _validate_llmstxt(content: str, results: List[Dict]) -> List[Dict]:
             })
             break  # one warning is enough
 
-    # Check for blockquote summary
-    if "\n>" not in content and not content.split("\n", 2)[1].startswith(">"):
+    # Spot-check a sample of URLs for 200 status (max 5 to avoid slowness)
+    sample_urls = [r["url"] for r in results[:5]]
+    broken_urls = []
+    for url in sample_urls:
+        try:
+            resp = requests.head(url, timeout=5, allow_redirects=True)
+            if resp.status_code >= 400:
+                broken_urls.append((url, resp.status_code))
+        except requests.RequestException:
+            broken_urls.append((url, "timeout/error"))
+    if broken_urls:
+        url_list = ", ".join(f"{u} ({s})" for u, s in broken_urls)
         issues.append({
-            "level": "info",
-            "message": "No blockquote summary found. Consider adding a > summary line for better LLM context.",
+            "level": "warning",
+            "message": f"Broken URLs detected (spot-check): {url_list}",
         })
 
-    # Check for sections
-    if "## " not in content:
+    # -- Markdown syntax checks --------------------------------------------
+
+    # Ensure every link line matches - [Title](url): description
+    import re
+    link_pattern = re.compile(r"^- \[.+\]\(https?://.+\):")
+    for line in lines:
+        if line.startswith("- [") and not link_pattern.match(line):
+            issues.append({
+                "level": "warning",
+                "message": f"Malformed link entry: `{line[:80]}` — expected format: `- [Title](url): Description`",
+            })
+            break
+
+    # Check the file would render as plain text (no HTML tags)
+    if re.search(r"<(div|span|a |p |img |script|style)", content, re.IGNORECASE):
+        issues.append({
+            "level": "warning",
+            "message": "HTML tags detected in output — llms.txt should be plain Markdown, not HTML.",
+        })
+
+    # -- Content quality checks --------------------------------------------
+
+    # Check for Contact section (recommended for all site types)
+    has_contact = any(
+        "contact" in r.get("title", "").lower()
+        or "contact" in r["url"].lower()
+        or "customer-service" in r["url"].lower()
+        or "store-locator" in r["url"].lower()
+        or "support" in r["url"].lower()
+        for r in results
+    )
+    if not has_contact and "## Contact" not in content:
         issues.append({
             "level": "info",
-            "message": "No H2 sections found. Grouping pages under sections improves LLM navigation.",
+            "message": (
+                "No Contact / Customer Service section detected. Consider adding "
+                "contact pages, store locators, or support links so AI systems can "
+                "answer queries like 'how do I contact [brand]' or '[brand] near me'."
+            ),
+        })
+
+    # Check for llms-full.txt reference
+    if "llms-full.txt" not in content:
+        issues.append({
+            "level": "info",
+            "message": "No llms-full.txt reference found. Consider linking to the full companion file.",
         })
 
     return issues
@@ -750,11 +872,18 @@ class LLMsTextGenerator:
         pages_text = "\n".join(page_list)
 
         if pattern == PATTERN_WORKFLOW:
-            template_hint = "Organize around workflows and tasks: Quickstart, Setup & Configuration, Features, Workflows, Troubleshooting, Reference."
+            template_hint = "Organize around workflows and tasks: Quickstart, Setup & Configuration, Features, Workflows, Troubleshooting, Reference, Contact."
         elif pattern == PATTERN_INDEX_EXPORT:
-            template_hint = "Organize as a documentation index: Overview, Documentation, Tutorials, API, Examples."
+            template_hint = "Organize as a documentation index: Overview, Documentation, Tutorials, API, Examples, Contact."
+        elif pattern == PATTERN_ECOMMERCE:
+            template_hint = (
+                "Organize as an e-commerce site: Brand Overview, Product Categories, "
+                "Brand Portfolio, Shopping Help, Customer Service, Store Locator, "
+                "Important Pages, Contact. Always include a Contact section with "
+                "customer service, store locator, and support pages."
+            )
         else:
-            template_hint = "Organize as a product catalog: Getting Started, Core Concepts, Guides, API Reference, Integrations, Resources."
+            template_hint = "Organize as a product catalog: Getting Started, Core Concepts, Guides, API Reference, Integrations, Resources, Contact."
 
         prompt = (
             f"Group these web pages into 3-7 semantic sections for an llms.txt file.\n\n"
@@ -1192,21 +1321,24 @@ def main():
         st.caption("Applies to both Firecrawl and Screaming Frog CSV modes")
 
         pattern = st.selectbox(
-            "Output pattern",
+            "Site type",
             options=[
-                ("Catalog (multi-product, API-centric)", PATTERN_CATALOG),
-                ("Workflow (dev tools, IDE integrations)", PATTERN_WORKFLOW),
-                ("Index + Export (dense docs, AI-native)", PATTERN_INDEX_EXPORT),
+                (PATTERN_LABELS[PATTERN_CATALOG], PATTERN_CATALOG),
+                (PATTERN_LABELS[PATTERN_WORKFLOW], PATTERN_WORKFLOW),
+                (PATTERN_LABELS[PATTERN_INDEX_EXPORT], PATTERN_INDEX_EXPORT),
+                (PATTERN_LABELS[PATTERN_ECOMMERCE], PATTERN_ECOMMERCE),
             ],
             format_func=lambda x: x[0],
             index=0,
             help=(
-                "**Catalog**: Groups by product area — Getting Started, Core Concepts, "
-                "Guides, API Reference. Best for multi-product platforms (Stripe, Cloudflare).\n\n"
-                "**Workflow**: Groups by developer tasks — Quickstart, Setup, Features, "
-                "Troubleshooting. Best for dev tools (Cursor, Windsurf).\n\n"
-                "**Index + Export**: Groups as doc index — Overview, Documentation, "
-                "Tutorials, API, Examples. Best for dense docs (Anthropic, LangGraph)."
+                "**SaaS / API Platform**: Getting Started, Core Concepts, Guides, "
+                "API Reference, Integrations, Resources, Contact.\n\n"
+                "**Developer Tool / IDE**: Quickstart, Setup, Features, Workflows, "
+                "Troubleshooting, Reference, Contact.\n\n"
+                "**Documentation / AI-Native**: Overview, Documentation, Tutorials, "
+                "API, Examples, Contact.\n\n"
+                "**E-Commerce / Retail**: Brand Overview, Product Categories, Brand Portfolio, "
+                "Shopping Help, Customer Service, Store Locator, Contact."
             ),
         )[1]
 

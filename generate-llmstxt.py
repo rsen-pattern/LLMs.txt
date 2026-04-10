@@ -52,17 +52,22 @@ OPTIONAL_LINK_SCORE_THRESHOLD = 5
 PATTERN_CATALOG = "catalog"
 PATTERN_WORKFLOW = "workflow"
 PATTERN_INDEX_EXPORT = "index_export"
+PATTERN_ECOMMERCE = "ecommerce"
 
 CATALOG_SECTIONS = [
     "Getting Started", "Core Concepts", "Guides", "API Reference",
-    "Integrations", "Resources", "Optional",
+    "Integrations", "Resources", "Contact", "Optional",
 ]
 WORKFLOW_SECTIONS = [
     "Quickstart", "Setup & Configuration", "Features", "Workflows",
-    "Troubleshooting", "Reference", "Optional",
+    "Troubleshooting", "Reference", "Contact", "Optional",
 ]
 INDEX_EXPORT_SECTIONS = [
-    "Overview", "Documentation", "Tutorials", "API", "Examples", "Optional",
+    "Overview", "Documentation", "Tutorials", "API", "Examples", "Contact", "Optional",
+]
+ECOMMERCE_SECTIONS = [
+    "Brand Overview", "Product Categories", "Brand Portfolio", "Shopping Help",
+    "Customer Service", "Store Locator", "Important Pages", "Contact", "Optional",
 ]
 
 logging.basicConfig(
@@ -175,6 +180,20 @@ def _is_optional_page(r: Dict) -> bool:
     return is_deep and is_low_importance
 
 
+_CONTACT_URL_KEYWORDS = {
+    "contact", "customer-service", "customer-support", "store-locator",
+    "find-a-store", "locations", "help-centre", "help-center", "support",
+}
+
+
+def _is_contact_page(r: Dict) -> bool:
+    url_lower = r["url"].lower()
+    title_lower = r.get("title", "").lower()
+    return any(kw in url_lower for kw in _CONTACT_URL_KEYWORDS) or any(
+        kw in title_lower for kw in ("contact", "store locator", "customer service")
+    )
+
+
 def _group_into_sections_by_url(
     results: List[Dict],
 ) -> Tuple[Dict[str, Dict], List[Dict]]:
@@ -185,6 +204,10 @@ def _group_into_sections_by_url(
     for r in results:
         if _is_optional_page(r):
             optional.append(r)
+        elif _is_contact_page(r):
+            if "Contact" not in sections:
+                sections["Contact"] = {"description": "", "pages": []}
+            sections["Contact"]["pages"].append(r)
         else:
             name = _url_to_section(r["url"])
             if name not in sections:
@@ -198,6 +221,16 @@ def _group_into_sections_by_url(
     return sections, optional
 
 
+def _get_template_order(pattern: str) -> List[str]:
+    if pattern == PATTERN_WORKFLOW:
+        return WORKFLOW_SECTIONS
+    elif pattern == PATTERN_INDEX_EXPORT:
+        return INDEX_EXPORT_SECTIONS
+    elif pattern == PATTERN_ECOMMERCE:
+        return ECOMMERCE_SECTIONS
+    return CATALOG_SECTIONS
+
+
 def _format_spec_llmstxt(
     site_url: str,
     site_name: str,
@@ -206,20 +239,28 @@ def _format_spec_llmstxt(
     optional: List[Dict],
     pattern: str = PATTERN_CATALOG,
 ) -> str:
+    from datetime import datetime
+
     lines = [f"# {site_name}\n"]
+
+    # Blockquote summary — always include (required by spec)
     if site_summary:
         lines.append(f"> {site_summary}\n")
-
-    if pattern == PATTERN_WORKFLOW:
-        template_order = WORKFLOW_SECTIONS
-    elif pattern == PATTERN_INDEX_EXPORT:
-        template_order = INDEX_EXPORT_SECTIONS
     else:
-        template_order = CATALOG_SECTIONS
+        domain = urlparse(site_url).netloc.replace("www.", "")
+        lines.append(f"> Official website content for {domain}.\n")
 
-    template_names = [s for s in template_order if s in sections and s != "Optional"]
-    remaining = sorted([s for s in sections if s not in template_order and s != "Optional"])
+    # llms-full.txt companion reference
+    domain = urlparse(site_url).netloc.replace("www.", "")
+    lines.append(f"For full page content, see [{domain}/llms-full.txt]({site_url.rstrip('/')}/llms-full.txt)\n")
+
+    template_order = _get_template_order(pattern)
+
+    template_names = [s for s in template_order if s in sections and s not in ("Optional", "Contact")]
+    remaining = sorted([s for s in sections if s not in template_order and s not in ("Optional", "Contact")])
     section_order = template_names + remaining
+    if "Contact" in sections:
+        section_order.append("Contact")
 
     for section_name in section_order:
         section_data = sections[section_name]
@@ -239,6 +280,10 @@ def _format_spec_llmstxt(
         lines.append("\n## Optional\n")
         for r in optional:
             lines.append(f"- [{r['title']}]({r['url']}): {r['description']}")
+
+    # Maintenance note
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    lines.append(f"\n---\n*Generated {today}. Recommend reviewing quarterly or after major site changes.*\n")
 
     return "\n".join(lines) + "\n"
 
@@ -655,9 +700,9 @@ def main():
                         help="Directory to save output files")
     parser.add_argument("--firecrawl-api-key", default=os.getenv("FIRECRAWL_API_KEY"))
     parser.add_argument("--bifrost-api-key", default=os.getenv("BIFROST_API_KEY"))
-    parser.add_argument("--pattern", choices=[PATTERN_CATALOG, PATTERN_WORKFLOW, PATTERN_INDEX_EXPORT],
+    parser.add_argument("--pattern", choices=[PATTERN_CATALOG, PATTERN_WORKFLOW, PATTERN_INDEX_EXPORT, PATTERN_ECOMMERCE],
                         default=PATTERN_CATALOG,
-                        help="Output pattern: catalog (Stripe-style), workflow (Cursor-style), or index_export (Anthropic-style)")
+                        help="Site type: catalog (SaaS/API), workflow (dev tools), index_export (docs), ecommerce (retail)")
     parser.add_argument("--no-full-text", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
