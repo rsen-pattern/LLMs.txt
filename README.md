@@ -30,6 +30,35 @@ A **Streamlit** web app that generates `llms.txt` and `llms-full.txt` files for 
 
 - **`llms.txt`** — Curated index with H1 title, blockquote summary, H2 sections, and `## Optional` for lower-priority pages
 - **`llms-full.txt`** — Complete markdown content of all pages
+- **Combined single-file mode** — Merge ToC and full content into one file
+
+## Features
+
+### Interactive Post-Generation Editing
+After generating, you can fine-tune the output before downloading:
+
+- **Editable site name & summary** — Override the AI-generated title and description
+- **Per-page include/exclude** — Checkboxes to toggle individual pages on/off
+- **Section reordering** — Assign position numbers to reorder H2 sections
+- **Markdown preview** — Toggle between raw text and rendered markdown views
+- **Content stats** — Pages count, file sizes, estimated token counts
+
+### Supabase Persistence (Optional)
+Connect a Supabase project to save per-domain configurations:
+
+- Site name, summary, excluded pages, section ordering
+- Load saved configs for previously generated sites
+- Requires `SUPABASE_URL` and `SUPABASE_KEY` in environment or Streamlit secrets
+
+**Supabase table setup** — create this table in your Supabase project:
+```sql
+CREATE TABLE llmstxt_configs (
+  id BIGSERIAL PRIMARY KEY,
+  domain TEXT UNIQUE NOT NULL,
+  config JSONB NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+```
 
 ## Quick Start
 
@@ -58,6 +87,8 @@ The app will open at `http://localhost:8501`. Enter your API keys in the sidebar
    ```toml
    BIFROST_API_KEY = "sk-bf-..."
    FIRECRAWL_API_KEY = "fc-..."
+   SUPABASE_URL = "https://your-project.supabase.co"
+   SUPABASE_KEY = "your-anon-key"
    ```
 
 ## API Keys
@@ -66,6 +97,7 @@ The app will open at `http://localhost:8501`. Enter your API keys in the sidebar
 |-----|-------------|---------|
 | **Patterns Bifrost** | AI-generated titles/descriptions | Your Bifrost dashboard |
 | **Firecrawl** | Auto-crawl mode or CSV + scrape mode | [firecrawl.dev](https://firecrawl.dev) |
+| **Supabase** (optional) | Persistent config storage | [supabase.com](https://supabase.com) |
 
 Keys are entered in the app sidebar. No keys are stored — they live only in your browser session.
 
