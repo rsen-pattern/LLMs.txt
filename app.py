@@ -1412,7 +1412,7 @@ def main():
             min_word_count = st.number_input(
                 "Min word count",
                 min_value=10,
-                max_value=500,
+                max_value=1500,
                 value=50,
                 step=10,
             )
