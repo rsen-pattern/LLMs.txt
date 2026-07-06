@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="layout">
+    <aside class="sidebar">
+        <div class="brand">
+            <span class="brand-mark">Pattern</span>
+            <p class="brand-title"><span class="brand-accent">llms.txt</span><br>Generator</p>
+            <div class="brand-rule"></div>
+        </div>
+
+        <div class="status-panel">
+            <h3>Environment</h3>
+            <p class="hint" style="margin-bottom:1rem;">Keys from <code>.env</code></p>
+            <ul class="status-list">
+                <li class="status-item">
+                    <span>Bifrost</span>
+                    <span class="status-dot {% if has_bifrost %}ok{% else %}warn{% endif %}"></span>
+                </li>
+                <li class="status-item">
+                    <span>Firecrawl</span>
+                    <span class="status-dot {% if has_firecrawl %}ok{% else %}warn{% endif %}"></span>
+                </li>
+                <li class="status-item">
+                    <span>Snowflake</span>
+                    <span class="status-dot {% if has_snowflake %}ok{% else %}optional{% endif %}"></span>
+                </li>
+            </ul>
+        </div>
+
+        {% if saved_domains %}
+        <div class="saved-panel">
+            <h3>Saved configs</h3>
+            <ul class="saved-list">
+                {% for domain in saved_domains %}
+                <li>{{ domain }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </aside>
+
+    <main class="main">
+        <header class="hero">
+            <h1><span class="brand-accent">llms.txt</span> Generator</h1>
+            <p class="hero-lead">
+                Build spec-compliant <strong>llms.txt</strong> and <strong>llms-full.txt</strong>
+                catalogs from Firecrawl or Screaming Frog exports — AI summaries via Bifrost, configs saved to Snowflake.
+            </p>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flash-stack">
+            {% for category, message in messages %}
+            <div class="flash {{ category }}" role="alert">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        <div class="mode-switcher">
+            <div class="tab-list" role="tablist">
+                <button type="button" class="tab-btn active" data-tab="firecrawl" role="tab" aria-selected="true">Firecrawl</button>
+                <button type="button" class="tab-btn" data-tab="csv" role="tab" aria-selected="false">Screaming Frog</button>
+            </div>
+
+            <div id="tab-firecrawl" class="tab-panel active" role="tabpanel">
+                {% include "partials/guide_firecrawl.html" %}
+                <div class="form-card">
+                    <p class="form-intro">Discover pages automatically via Firecrawl, scrape markdown content, and generate AI-refined titles and descriptions.</p>
+                    <form method="post" action="{{ url_for('generate_firecrawl') }}">
+                        <div class="form-grid">
+                            <div class="field full">
+                                <label for="fc_url">Website URL</label>
+                                <input type="url" id="fc_url" name="site_url" placeholder="https://example.com" required>
+                            </div>
+                            <div class="field">
+                                <label for="fc_pattern">Site type</label>
+                                <select id="fc_pattern" name="pattern">
+                                    {% for value, label in pattern_choices %}
+                                    <option value="{{ value }}">{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label for="fc_max_urls">Max URLs</label>
+                                <input type="number" id="fc_max_urls" name="max_urls" value="20" min="1" max="1500" step="5">
+                            </div>
+                            <div class="field full">
+                                <div class="check-group">
+                                    <label><input type="checkbox" name="generate_full" checked> Generate llms-full.txt companion file</label>
+                                    <label><input type="checkbox" name="single_file_mode"> Merge into a single combined file</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="actions">
+                            <button type="submit" class="btn btn-primary">Generate catalog</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div id="tab-csv" class="tab-panel" role="tabpanel" hidden>
+                {% include "partials/guide_csv.html" %}
+                <div class="form-card">
+                    <p class="form-intro">Upload a Screaming Frog <em>Internal All</em> export. The tool uses <strong>20+ columns</strong> including link metrics, content hashes, and canonical URLs for deduplication, importance ranking, and automatic <code>## Optional</code> section detection.</p>
+                    <form method="post" action="{{ url_for('generate_csv') }}" enctype="multipart/form-data">
+                        <div class="form-grid">
+                            <div class="field full">
+                                <label for="csv_url">Website URL</label>
+                                <input type="url" id="csv_url" name="site_url" placeholder="https://example.com" required>
+                            </div>
+                            <div class="field full">
+                                <label>CSV export</label>
+                                <div class="file-zone">
+                                    <input type="file" id="csv_file" name="csv_file" accept=".csv" required>
+                                    <span class="file-zone-label">Drop file or click to browse</span>
+                                    <span class="file-zone-name"></span>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label for="csv_pattern">Site type</label>
+                                <select id="csv_pattern" name="pattern">
+                                    {% for value, label in pattern_choices %}
+                                    <option value="{{ value }}">{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label for="csv_max_urls">Max URLs</label>
+                                <input type="number" id="csv_max_urls" name="max_urls" value="20" min="1" max="1500" step="5">
+                            </div>
+                            <div class="field">
+                                <label for="near_dupe_threshold">Similarity %</label>
+                                <input type="number" id="near_dupe_threshold" name="near_dupe_threshold" value="90" min="50" max="100" step="5">
+                            </div>
+                            <div class="field">
+                                <label for="min_word_count">Min word count</label>
+                                <input type="number" id="min_word_count" name="min_word_count" value="50" min="10" max="1500" step="10">
+                            </div>
+                            <div class="field full">
+                                <div class="check-group">
+                                    <label><input type="checkbox" name="generate_full" checked> Generate llms-full.txt</label>
+                                    <label><input type="checkbox" name="single_file_mode"> Combined single file</label>
+                                    <label><input type="checkbox" name="use_ai" checked> AI titles &amp; descriptions (Bifrost)</label>
+                                    <label><input type="checkbox" name="scrape_content"> Scrape full content (Firecrawl)</label>
+                                    <label><input type="checkbox" name="dedup_enabled" checked> Remove duplicates</label>
+                                    <label><input type="checkbox" name="near_dupes_enabled"> Remove near-duplicates</label>
+                                    <label><input type="checkbox" name="thin_content_enabled"> Remove thin content</label>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="actions">
+                            <button type="submit" class="btn btn-primary">Generate catalog</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        {% if result %}
+        <section class="results-section" id="results">
+            <p class="section-label">Output</p>
+            <h2>Your catalog</h2>
+
+            <div class="stats">
+                <div class="stat"><strong>{{ result.num_urls_processed }}</strong><span>Pages</span></div>
+                <div class="stat"><strong>{{ stats.size_kb }}</strong><span>KB · llms.txt</span></div>
+                <div class="stat"><strong>{{ "{:,}".format(stats.toc_tokens) }}</strong><span>Est. tokens</span></div>
+                {% if stats.full_size_kb %}
+                <div class="stat"><strong>{{ stats.full_size_kb }}</strong><span>KB · full</span></div>
+                {% endif %}
+            </div>
+
+            {% if result.validation %}
+            <details class="panel" open>
+                <summary>Validation · {{ result.validation|length }} note{{ 's' if result.validation|length != 1 else '' }}</summary>
+                <div class="panel-body">
+                    {% for issue in result.validation %}
+                    <div class="flash {{ issue.level }}">{{ issue.message }}</div>
+                    {% endfor %}
+                </div>
+            </details>
+            {% else %}
+            <div class="flash success">All validation checks passed.</div>
+            {% endif %}
+
+            <form method="post" action="{{ url_for('regenerate') }}">
+                <div class="form-card" style="margin-top:1.5rem;">
+                    <p class="section-label" style="margin-bottom:1rem;">Edit before export</p>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="site_name">Site name</label>
+                            <input type="text" id="site_name" name="site_name" value="{{ result.site_name }}">
+                        </div>
+                        <div class="field">
+                            <label for="site_summary">Site summary</label>
+                            <input type="text" id="site_summary" name="site_summary" value="{{ result.site_summary }}">
+                        </div>
+                    </div>
+
+                    <details class="panel" style="margin-top:1.25rem;border:none;background:transparent;">
+                        <summary>Page selection · {{ result.results|length }} URLs</summary>
+                        <div class="panel-body" style="border:none;padding:0.75rem 0 0;">
+                            <div class="page-list">
+                                {% set excluded = result.excluded_urls or [] %}
+                                {% for page in result.results %}
+                                <input type="hidden" name="all_urls" value="{{ page.url }}">
+                                <div class="page-row">
+                                    <label>
+                                        <input type="checkbox" name="included" value="{{ page.url }}"
+                                            {% if page.url not in excluded %}checked{% endif %}>
+                                        <span>
+                                            <strong>{{ page.title }}</strong>
+                                            <code>{{ page.url }}</code>
+                                        </span>
+                                    </label>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <p class="hint" style="margin-top:0.75rem;">Uncheck pages to exclude, then regenerate.</p>
+                        </div>
+                    </details>
+
+                    <div class="actions">
+                        <button type="submit" class="btn btn-primary">Regenerate</button>
+                        <a class="btn btn-download" href="{{ url_for('download', filetype='llmstxt') }}">↓ llms.txt</a>
+                        {% if result.llms_fulltxt %}
+                        <a class="btn btn-download" href="{{ url_for('download', filetype='full') }}">↓ llms-full.txt</a>
+                        {% endif %}
+                        {% if result._single_file_mode and result.llms_fulltxt %}
+                        <a class="btn btn-download" href="{{ url_for('download', filetype='combined') }}">↓ Combined</a>
+                        {% endif %}
+                        {% if has_snowflake %}
+                        <button type="submit" formaction="{{ url_for('save_config') }}" class="btn btn-secondary">Save to Snowflake</button>
+                        {% endif %}
+                    </div>
+                </div>
+            </form>
+
+            <div class="preview-block">
+                <h3>Preview</h3>
+                <div class="preview-frame">
+                    <div class="preview-chrome">
+                        <span class="preview-dot"></span>
+                        <span class="preview-dot"></span>
+                        <span class="preview-dot"></span>
+                        <span class="preview-filename">llms.txt</span>
+                    </div>
+                    <pre class="output">{{ result.llmstxt }}</pre>
+                </div>
+            </div>
+
+            <form method="post" action="{{ url_for('clear_result') }}" class="actions" style="border:none;padding-top:1rem;">
+                <button type="submit" class="btn btn-secondary">Clear results</button>
+            </form>
+        </section>
+        {% endif %}
+    </main>
+</div>
+{% endblock %}

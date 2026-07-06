@@ -1,0 +1,35 @@
+{# How-to guides ported from the original Streamlit expanders #}
+
+<details class="guide-panel">
+    <summary>
+        <span class="guide-icon" aria-hidden="true">ℹ</span>
+        How to use Firecrawl mode
+    </summary>
+    <div class="guide-body prose">
+        <p><strong>Requirements:</strong> Firecrawl API key + Bifrost API key (set in <code>.env</code>)</p>
+
+        <h4>How it works</h4>
+        <ol>
+            <li>Enter your website URL below and click <strong>Generate catalog</strong></li>
+            <li>Firecrawl's <code>/map</code> endpoint discovers all pages on the site</li>
+            <li>Each page is scraped for its full markdown content</li>
+            <li>Bifrost AI generates concise titles and action-oriented descriptions</li>
+            <li>Pages are grouped into sections and output as <code>llms.txt</code> + <code>llms-full.txt</code></li>
+        </ol>
+
+        <h4>Tips for best results</h4>
+        <ul>
+            <li><strong>Max URLs:</strong> Start with 20–50 for a quick test, increase to 100+ for comprehensive output</li>
+            <li><strong>Site type:</strong> Choose <em>Catalog</em> for docs-heavy sites, <em>Workflow</em> for developer tools, <em>Index + Export</em> for tutorial-focused sites</li>
+            <li>The tool automatically detects the site name and generates a one-line summary</li>
+            <li>Pages are ranked by importance; low-value deep pages go to <code>## Optional</code></li>
+        </ul>
+
+        <h4>Limitations</h4>
+        <ul>
+            <li>Some sites block automated scraping — if results are empty, try Screaming Frog CSV mode instead</li>
+            <li>JavaScript-heavy SPAs may return incomplete content</li>
+            <li>Rate limits apply based on your Firecrawl plan</li>
+        </ul>
+    </div>
+</details>

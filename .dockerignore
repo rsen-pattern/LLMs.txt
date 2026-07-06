@@ -25,13 +25,7 @@ wheels/
 
 # Environment variables
 .env
-
-# Private keys
-*.p8
-*.pem
-*_rsa_key.p8
-rsa_key.p8
-private_key*
+.env.local
 
 # IDE
 .vscode/
@@ -43,4 +37,19 @@ private_key*
 # OS
 .DS_Store
 Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Other
+*.log
 

@@ -1,0 +1,29 @@
+images:
+  llms-txt:
+    build: Dockerfile
+    retention: 3
+    architecture: amd64
+services:
+  llms-txt:
+    image: llms-txt
+    count: 1
+    cpu: 256
+    memory: 512
+    cluster: internal
+    disable_metrics: true
+    disable_fluentbit: true
+    gatekeeper:
+      port: 3000
+      suffix: '{{ if eq .__ENV__ "dev" }}-dev{{ end }}'
+      health:
+        endpoint: /
+    env:
+      SNOWFLAKE_PRIVATE_KEY_PATH: /etc/pattern.d/snowflake_key.pem
+      SNOWFLAKE_ACCOUNT: PATTERN
+      SNOWFLAKE_DATABASE: PATTERN_DB
+      SNOWFLAKE_SCHEMA: PUBLIC
+      SNOWFLAKE_USERNAME: VIBE__APP_USER
+      SNOWFLAKE_WAREHOUSE: VIBE_CODE_WH
+      BIFROST_API_KEY: {{ secret "/bifrost_api_key" }}
+    configs:
+      snowflake_key.pem: configs/snowflake_key.pem.tmpl
