@@ -1,4 +1,5 @@
-streamlit>=1.30.0
+Flask==3.0.0
+snowflake-connector-python==3.13.1
+python-dotenv==1.0.0
 requests>=2.31.0
 openai>=1.3.0
-supabase>=2.0.0

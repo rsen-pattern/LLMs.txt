@@ -1,0 +1,73 @@
+{# How-to guides ported from the original Streamlit expanders #}
+
+<details class="guide-panel">
+    <summary>
+        <span class="guide-icon" aria-hidden="true">ℹ</span>
+        How to get your Screaming Frog CSV
+    </summary>
+    <div class="guide-body prose">
+        <h4>Step 1 — Configure the Spider (before crawling)</h4>
+        <ul>
+            <li><strong>Configuration &gt; Spider &gt; Crawl:</strong> Check "Crawl Internal Links", uncheck "Crawl External Links"</li>
+            <li><strong>Configuration &gt; Spider &gt; Limits:</strong> Set Crawl Depth to 5–8 (prevents endlessly deep pages)</li>
+            <li><strong>Configuration &gt; Content &gt; Duplicates:</strong> Check "Enable Near Duplicates" (needed for similarity filtering)</li>
+            <li><strong>Configuration &gt; Content &gt; Area:</strong> Check "Hash" (enables content hash for exact dedup)</li>
+        </ul>
+
+        <h4>Step 2 — Crawl the website</h4>
+        <ul>
+            <li>Enter the full URL (e.g. <code>https://example.com</code>) and click <strong>Start</strong></li>
+            <li>Wait for the crawl to complete (progress bar shows status)</li>
+        </ul>
+
+        <h4>Step 3 — Export the CSV</h4>
+        <ul>
+            <li>Click the <strong>Internal</strong> tab at the top</li>
+            <li>Set the filter dropdown to <strong>HTML</strong> (pre-filters to HTML pages only)</li>
+            <li>Go to <strong>File &gt; Export</strong> and save as CSV</li>
+            <li>Upload that CSV file below</li>
+        </ul>
+
+        <h4>Recommended settings by site size</h4>
+        <table class="guide-table">
+            <thead>
+                <tr><th>Site size</th><th>Max URLs</th><th>Crawl depth</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Small (&lt;100 pages)</td><td>Unlimited</td><td>No limit</td></tr>
+                <tr><td>Medium (100–1,000)</td><td>500</td><td>6</td></tr>
+                <tr><td>Large (1,000–10,000)</td><td>1,000</td><td>5</td></tr>
+                <tr><td>Very large (10,000+)</td><td>2,000</td><td>4</td></tr>
+            </tbody>
+        </table>
+    </div>
+</details>
+
+<details class="guide-panel">
+    <summary>
+        <span class="guide-icon" aria-hidden="true">ℹ</span>
+        Content filters &amp; modes
+    </summary>
+    <div class="guide-body prose">
+        <h4>Three processing modes</h4>
+        <table class="guide-table">
+            <thead>
+                <tr><th>Mode</th><th>AI</th><th>Scrape</th><th>Keys needed</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><strong>CSV only</strong> (fastest)</td><td>Off</td><td>Off</td><td>None</td></tr>
+                <tr><td><strong>CSV + AI</strong> (recommended)</td><td>On</td><td>Off</td><td>Bifrost</td></tr>
+                <tr><td><strong>CSV + Scrape</strong> (full content)</td><td>On</td><td>On</td><td>Bifrost + Firecrawl</td></tr>
+            </tbody>
+        </table>
+
+        <h4>Content filters</h4>
+        <ul>
+            <li><strong>Remove duplicates:</strong> Uses canonical URLs + content hashes (recommended)</li>
+            <li><strong>Remove near-duplicates:</strong> Filters pages above the similarity threshold — requires "Enable Near Duplicates" in Screaming Frog</li>
+            <li><strong>Remove thin content:</strong> Filters pages below the minimum word count (e.g. 50 words)</li>
+        </ul>
+
+        <p>This tool reads <strong>20+ columns</strong> from the Screaming Frog export — link metrics, content hashes, and canonical URLs for deduplication, importance ranking, and automatic <code>## Optional</code> section detection.</p>
+    </div>
+</details>

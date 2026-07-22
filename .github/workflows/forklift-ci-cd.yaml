@@ -1,0 +1,91 @@
+name: Forklift
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  forklift:
+    name: Deploy
+    runs-on: ubuntu-24.04
+    strategy:
+      max-parallel: ${{ vars.DEPLOY_PARALLELISM || 1 }}
+      fail-fast: ${{ vars.DEPLOY_FAIL_FAST || true }}
+      matrix:
+        environment: ${{ fromJson(vars.ENVIRONMENTS || '["internal-applications"]') }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Checkout forklift action external
+        uses: actions/checkout@v4
+        with:
+          repository: patterninc/forklift
+          ref: v1
+          path: .github/actions/forklift
+          token: ${{ secrets.GHA_RUNNER_TOKEN }}
+
+      - name: Update repo files
+        run: |
+          FILE=".github/actions/forklift/configs/context.yaml.tmpl"
+
+          awk '
+          BEGIN { in_cognito = 0 }
+          /^# set cognito context$/ {
+            print
+            print "cognito:"
+            print "  client_id: 5ci2vgdkjrcgf5rog8qt2iitfp"
+            print "  user_pool_id: us-west-2_ddtQeNg9m"
+            print "  user_pool_domain: us-west-2ddtqeng9m"
+            print "  identity_provider: okta-provider"
+            in_cognito = 1
+            next
+          }
+          in_cognito && /^# service discovery$/ {
+            in_cognito = 0
+            print
+            next
+          }
+          !in_cognito { print }
+          ' "$FILE" > "$FILE.tmp"
+
+          mv "$FILE.tmp" "$FILE"
+
+          echo "Updated Cognito block in $FILE"
+          cat "$FILE"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME != '' && vars.AWS_ROLE_TO_ASSUME || 'arn:aws:iam::046394856781:role/GHA-pattern-internal-internal-apps' }}
+          aws-region: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Verify AWS Account
+        run: |
+          CURRENT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          EXPECTED_ACCOUNT="046394856781"
+          if [ "$CURRENT_ACCOUNT" != "$EXPECTED_ACCOUNT" ]; then
+            echo "ERROR: Wrong AWS account! Expected $EXPECTED_ACCOUNT, got $CURRENT_ACCOUNT"
+            exit 1
+          fi
+          echo "✅ Confirmed deployment to internal-apps account ($CURRENT_ACCOUNT)"
+
+      - name: Run forklift
+        if:  ${{ hashFiles('forklift.yaml') != '' }}
+        uses: ./.github/actions/forklift
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || 'us-west-2' }}
+          ENV: ${{ matrix.environment }}
+          FORKLIFT_GITHUB_REPO: ${{ github.repository }}
+          FORKLIFT_GITHUB_SHA: ${{ github.sha }}
+          DNS_SUFFIX: ${{ secrets.DNS_SUFFIX != '' && secrets.DNS_SUFFIX  }}
